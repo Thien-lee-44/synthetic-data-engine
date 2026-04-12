@@ -60,7 +60,7 @@ pip install -r requirements.txt
 
 **3. Launch the Editor:**
 ```bash
-python src/app/main.py
+python run.py
 ```
 
 ## User Guide & Controls
