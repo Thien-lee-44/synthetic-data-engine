@@ -8,8 +8,9 @@ from src.ui.widgets.inspector.transform_widget import TransformWidget
 from src.ui.widgets.inspector.mesh_widget import MeshWidget
 from src.ui.widgets.inspector.light_widget import LightWidget
 from src.ui.widgets.inspector.camera_widget import CameraWidget
+from src.ui.widgets.inspector.semantic_widget import SemanticWidget
+from src.ui.widgets.inspector.animation_widget import AnimationWidget
 
-# Import SSOT configuration
 from src.app.config import (
     PANEL_TITLE_INSPECTOR, 
     PANEL_MIN_WIDTH_INSPECTOR, 
@@ -19,7 +20,8 @@ from src.app.config import (
 
 class InspectorPanelView(BasePanel):
     """
-    Dumb View that aggregates specific component property widgets based on the selected entity.
+    Dynamic View that aggregates specific component property widgets based on the selected entity.
+    Acts as the primary interface for modifying ECS component data.
     """
     PANEL_TITLE = PANEL_TITLE_INSPECTOR
     PANEL_DOCK_AREA = Qt.RightDockWidgetArea
@@ -42,14 +44,17 @@ class InspectorPanelView(BasePanel):
         content_layout.setContentsMargins(m, m, m, m)
         content_layout.setAlignment(Qt.AlignTop)
 
-        # Pass the controller to the sub-widgets so they can emit changes
         self.header_widget = HeaderWidget(self._controller)
+        self.semantic_widget = SemanticWidget(self._controller)
+        self.animation_widget = AnimationWidget(self._controller)
         self.transform_widget = TransformWidget(self._controller)
         self.mesh_widget = MeshWidget(self._controller)
         self.light_widget = LightWidget(self._controller)
         self.camera_widget = CameraWidget(self._controller)
 
         content_layout.addWidget(self.header_widget)
+        content_layout.addWidget(self.semantic_widget)
+        content_layout.addWidget(self.animation_widget)
         content_layout.addWidget(self.transform_widget)
         content_layout.addWidget(self.mesh_widget)
         content_layout.addWidget(self.light_widget)
@@ -62,23 +67,33 @@ class InspectorPanelView(BasePanel):
         self.hide_all_components()
 
     def hide_all_components(self) -> None:
-        for g in [self.header_widget, self.transform_widget, self.mesh_widget, self.light_widget, self.camera_widget]: 
-            g.setVisible(False)
-
-    # =========================================================================
-    # PUBLIC API FOR DATA INJECTION
-    # =========================================================================
+        widgets = [
+            self.header_widget, 
+            self.semantic_widget,
+            self.animation_widget,
+            self.transform_widget, 
+            self.mesh_widget, 
+            self.light_widget, 
+            self.camera_widget
+        ]
+        for widget in widgets: 
+            widget.setVisible(False)
 
     def update_inspector_data(self, data: Dict[str, Any]) -> None:
-        """Parses the data dictionary and delegates rendering to sub-widgets."""
         has_tf = bool(data.get("tf"))
         has_light = bool(data.get("light"))
         has_cam = bool(data.get("cam"))
+        has_semantic = bool(data.get("semantic"))
+        has_anim = bool(data.get("anim"))
         has_mesh = bool(data.get("mesh") and not has_light and not has_cam)
         mesh_visible = data["mesh"]["visible"] if data.get("mesh") else True
 
         self.header_widget.update_data(data["name"])
         
+        if has_semantic:
+            self.semantic_widget.update_data(data["semantic"])
+        if has_anim:
+            self.animation_widget.update_data(data["anim"])
         if has_tf: 
             self.transform_widget.update_data(data["tf"], has_light, data["light"]["type"] if has_light else "")
         if has_mesh: 
@@ -89,22 +104,20 @@ class InspectorPanelView(BasePanel):
             self.camera_widget.update_data(data["cam"], mesh_visible)
 
         self.header_widget.setVisible(True)
+        self.semantic_widget.setVisible(has_semantic)
+        self.animation_widget.setVisible(has_anim)
         self.transform_widget.setVisible(has_tf)
         self.mesh_widget.setVisible(has_mesh)
         self.light_widget.setVisible(has_light)
         self.camera_widget.setVisible(has_cam)
 
     def fast_update_transform(self, transform_tuple: tuple) -> None:
-        """Anti-lag hook: Extracts (mode, values) from tuple and updates the correct widget."""
         if not isinstance(transform_tuple, tuple) or len(transform_tuple) != 2:
             return
             
         mode, values = transform_tuple
-        
-        # Calls down to the Transform Widget to update exactly one coordinate axis
         self.transform_widget.fast_update_single_axis(mode, values)
         
-        # If currently rotating (ROTATE) and the Light panel is open, sync the Pitch/Yaw sliders
         if mode == "ROTATE" and self.light_widget.isVisible():
             if hasattr(self.light_widget, 'fast_update_rotation'):
                 self.light_widget.fast_update_rotation(values)

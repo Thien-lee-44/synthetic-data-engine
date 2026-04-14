@@ -9,11 +9,13 @@ from src.ui.controllers.hierarchy_ctrl import HierarchyController
 from src.ui.controllers.inspector_ctrl import InspectorController
 from src.ui.controllers.asset_ctrl import AssetController
 from src.ui.controllers.math_gen_ctrl import MathGenController
+from src.ui.controllers.timeline_ctrl import TimelineController
 
 class MainController:
     """
     Root Orchestrator.
     Initializes all sub-modules and manages Top Menu / Toolbar logic.
+    Acts as the central hub connecting UI events to Engine execution.
     """
     def __init__(self) -> None:
         self.project_ctrl = ProjectController()
@@ -22,7 +24,8 @@ class MainController:
         self.inspector_ctrl = InspectorController()
         self.asset_ctrl = AssetController()
         self.math_gen_ctrl = MathGenController()
-
+        self.timeline_ctrl = TimelineController()
+        
         self.main_window = EditorMainWindow(controller=self)
         ctx.main_window = self.main_window 
 
@@ -30,6 +33,7 @@ class MainController:
         self.main_window.register_dock(self.inspector_ctrl.view)
         self.main_window.register_dock(self.asset_ctrl.view)
         self.main_window.register_dock(self.math_gen_ctrl.view)
+        self.main_window.register_dock(self.timeline_ctrl.view) 
         
         self.main_window.set_central_viewport(self.viewport_ctrl.view)
 
@@ -40,8 +44,11 @@ class MainController:
 
         ctx.events.subscribe(AppEvent.SCENE_CHANGED, self.main_window.gl_widget.update)
 
-    @safe_execute(context="Camera Input Update")
+    @safe_execute(context="Tick Update")
     def _poll_continuous_input(self) -> None:
+        dt = 1.0 / config.TARGET_FPS
+        self.timeline_ctrl.advance_time(dt)
+        
         if self.viewport_ctrl.process_continuous_input():
             ctx.events.emit(AppEvent.SCENE_CHANGED)
 

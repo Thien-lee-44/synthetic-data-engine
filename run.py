@@ -19,8 +19,6 @@ def setup_environment() -> None:
 
 if __name__ == "__main__":
     setup_environment()
-    
     # Standard Python 3 absolute import to prevent Module Aliasing
     from src.app.main import run_app
-    
     run_app()

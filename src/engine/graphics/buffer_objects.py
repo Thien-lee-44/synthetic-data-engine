@@ -11,7 +11,7 @@ class BufferObject:
     Encapsulates OpenGL Vertex Array Objects (VAO), Vertex Buffer Objects (VBO), 
     and Element Buffer Objects (EBO). 
     Architectural Note: This class strictly manages raw geometry data transmission 
-    to the GPU memory.
+    to the GPU memory and computes spatial bounds for AI annotation.
     """
     
     def __init__(self, vertices: Union[List[float], np.ndarray], indices: Optional[Union[List[int], np.ndarray]] = None, vertex_size: int = 8, render_mode: int = GL_TRIANGLES) -> None:
@@ -20,12 +20,38 @@ class BufferObject:
         self.vertices = np.ascontiguousarray(vertices, dtype=np.float32)
         self.has_vertex_color = (vertex_size >= 11)
         
+        # [NEW] Compute Axis-Aligned Bounding Box (AABB) bounds directly from vertices
+        self._compute_aabb()
+        
         if indices is not None and len(indices) > 0:
             self.indices = np.ascontiguousarray(indices, dtype=np.uint32)
         else:
             self.indices = None
             
         self._setup_opengl_buffers()
+
+    def _compute_aabb(self) -> None:
+        """
+        Dynamically calculates the Axis-Aligned Bounding Box limits of the raw geometry.
+        Crucial for precise 2D YOLO bounding box projection in the Synthetic Generator.
+        """
+        if len(self.vertices) == 0 or self.vertex_size < 3:
+            self.aabb_min = glm.vec3(-0.5, -0.5, -0.5)
+            self.aabb_max = glm.vec3(0.5, 0.5, 0.5)
+            return
+            
+        # Reshape the flat 1D vertex array into a 2D matrix (Rows: Vertices, Cols: Attributes)
+        vertices_reshaped = self.vertices.reshape(-1, self.vertex_size)
+        
+        # Extract only the XYZ spatial positional data (first 3 columns)
+        positions = vertices_reshaped[:, 0:3]
+        
+        # Calculate the absolute spatial extents using vectorized NumPy operations
+        min_vals = np.min(positions, axis=0)
+        max_vals = np.max(positions, axis=0)
+        
+        self.aabb_min = glm.vec3(min_vals[0], min_vals[1], min_vals[2])
+        self.aabb_max = glm.vec3(max_vals[0], max_vals[1], max_vals[2])
 
     def _setup_opengl_buffers(self) -> None:
         self.vao = glGenVertexArrays(1)

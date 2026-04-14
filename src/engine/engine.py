@@ -10,7 +10,8 @@ from src.engine.geometry.primitives import PrimitivesManager
 from src.engine.scene.entity_factory import EntityFactory
 from src.engine.scene.scene_manager import SceneManager
 from src.engine.core.interaction_manager import InteractionManager
-
+from src.engine.scene.animator import AnimatorSystem
+ 
 class Engine:
     """
     The Ultimate Dynamic Facade.
@@ -26,6 +27,7 @@ class Engine:
         self.entity_fac = None
         self.scene_mgr = None
         self.interaction_mgr = None
+        self.animator = None
 
     def init_viewport_gl(self) -> None:
         self.scene = Scene()
@@ -37,6 +39,8 @@ class Engine:
         
         from src.engine.graphics.editor_renderer import GizmoRenderer
         self.gizmo_renderer = GizmoRenderer()
+        
+        self.animator = AnimatorSystem(self.scene)
         
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_BLEND)
@@ -288,3 +292,17 @@ class Engine:
 
     def set_render_settings(self, wireframe: bool, mode: int, output: int, light: bool, tex: bool, vcolor: bool) -> None:
         if self.renderer: self.renderer.set_render_settings(wireframe, mode, output, light, tex, vcolor)
+        
+
+    # =========================================================================
+    # SEMANTIC DELEGATION
+    # =========================================================================
+    
+    def get_semantic_classes(self) -> dict:
+        return self.scene_mgr.get_semantic_classes()
+
+    def add_semantic_class(self, name: str) -> int:
+        return self.scene_mgr.add_semantic_class(name)
+
+    def update_semantic_class_color(self, class_id: int, color: list) -> None:
+        self.scene_mgr.update_semantic_class_color(class_id, color)

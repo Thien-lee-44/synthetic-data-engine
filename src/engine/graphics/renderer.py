@@ -32,7 +32,6 @@ class Renderer:
         self.comb_tex: bool = True
         self.comb_vcolor: bool = True
         
-        # GPU Color Picking FBO tracking variables
         self.picking_fbo: Optional[int] = None
         self.picking_texture: Optional[int] = None
         self.picking_depth: Optional[int] = None
@@ -160,19 +159,15 @@ class Renderer:
                 active_shader.set_mat4("model", model_mat)
                 
                 if not is_depth_pass and not is_unlit_pass:
-                    # Optimization Note: Future iterations should calculate the Normal Matrix 
-                    # inside the Vertex Shader to offload matrix inversion from the CPU.
                     det = glm.determinant(glm.mat3(model_mat))
                     normal_mat = glm.transpose(glm.inverse(glm.mat3(model_mat))) if abs(det) > 1e-6 else glm.mat3(1.0)
                     active_shader.set_mat3("normalMatrix", normal_mat)
                 
                 if mesh.material:
-                    # Inject uniform/texture bindings only if the material changes (Leveraging RenderQueue sorting)
                     if id(mesh.material) != current_mat_id and not is_depth_pass:
                         mesh.material.apply(active_shader)
                         current_mat_id = id(mesh.material)
                     
-                    # Apply OpenGL Render States based on discrete material settings
                     r_state = mesh.material.render_state
                     
                     if r_state.cull_face:
@@ -187,7 +182,6 @@ class Renderer:
                     else:
                         glDisable(GL_DEPTH_TEST)
                         
-                    # Override depth mask based on Queue type (Transparent passes disable Z-writes)
                     glDepthMask(GL_TRUE if force_depth_write and r_state.depth_write else GL_FALSE)
                     
                 geom_obj = getattr(mesh.geometry, 'mesh', mesh.geometry)
@@ -195,14 +189,11 @@ class Renderer:
 
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE if self.wireframe else GL_FILL)
         
-        # 1. Draw Opaque (Write to Depth Buffer)
         draw_list(self.queue.opaque, force_depth_write=True)
         
-        # 2. Draw Transparent (No Depth Write, Back-to-Front Painter's Algorithm)
         if not is_depth_pass:
             draw_list(self.queue.transparent, force_depth_write=False)
             
-        # Restore default global GL states to prevent interference with subsequent Gizmo/HUD rendering passes
         glDepthMask(GL_TRUE)
         glEnable(GL_CULL_FACE)
         glCullFace(GL_BACK)
@@ -215,7 +206,6 @@ class Renderer:
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
         
         for tf, mesh, ent in self.queue.proxies:
-            # Prevent rendering the proxy of the currently active viewpoint
             if active_camera and ent.get_component(type(active_camera)) == active_camera:
                 continue 
                 
@@ -237,6 +227,98 @@ class Renderer:
                 self.editor_solid_shader.set_vec3("solidColor", base_c)
                 
             geom_obj.draw()
+
+    def capture_fbo_frame(self, scene: Scene, width: int, height: int, mode: str = "RGB") -> bytes:
+        """
+        Renders the current scene state into an off-screen Framebuffer Object (FBO) 
+        and extracts the raw pixel byte array. Supports RGB, Semantic MASK, and DEPTH.
+        """
+        if width <= 0 or height <= 0:
+            return b""
+
+        if self.picking_width != width or self.picking_height != height:
+            self._setup_picking_fbo(width, height)
+
+        glBindFramebuffer(GL_FRAMEBUFFER, self.picking_fbo)
+        glViewport(0, 0, width, height)
+        
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glEnable(GL_DEPTH_TEST)
+
+        active_camera = None
+        view_matrix = glm.mat4(1.0)
+        projection_matrix = glm.mat4(1.0)
+        
+        for tf, cam, ent in scene.cached_cameras:
+            if getattr(cam, 'is_active', False):
+                active_camera = cam
+                view_matrix = cam.get_view_matrix()
+                projection_matrix = cam.get_projection_matrix()
+                break
+
+        if not active_camera:
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            return b""
+
+        if mode in ["RGB", "DEPTH"]:
+            original_proxies = self.queue.proxies
+            self.queue.proxies = []
+            self.render_scene(scene, width, height)
+            self.queue.proxies = original_proxies
+            
+            if mode == "RGB":
+                glReadBuffer(GL_COLOR_ATTACHMENT0)
+                pixel_data = glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE)
+            else:
+                pixel_data = glReadPixels(0, 0, width, height, GL_DEPTH_COMPONENT, GL_FLOAT)
+                
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            return pixel_data
+            
+        elif mode == "MASK":
+            glDisable(GL_BLEND)
+            glDisable(GL_MULTISAMPLE)
+            self.pass_picking_shader.use()
+            self.pass_picking_shader.set_mat4("view", view_matrix)
+            self.pass_picking_shader.set_mat4("projection", projection_matrix)
+
+            def draw_mask_list(item_list):
+                try:
+                    from src.engine.scene.components.semantic_cmp import SemanticComponent
+                    from src.app import ctx
+                    classes = ctx.engine.get_semantic_classes()
+                except ImportError:
+                    return
+
+                for tf, mesh, ent in item_list:
+                    semantic = ent.get_component(SemanticComponent)
+                    if not semantic or not mesh.visible: 
+                        continue
+                    
+                    c_id = semantic.class_id
+                    c_info = classes.get(c_id, {})
+                    c_color = c_info.get("color", [1.0, 1.0, 1.0]) if isinstance(c_info, dict) else [1.0, 1.0, 1.0]
+                    color = glm.vec3(c_color[0], c_color[1], c_color[2])
+
+                    self.pass_picking_shader.set_vec3("u_ColorId", color)
+                    self.pass_picking_shader.set_mat4("model", tf.get_matrix())
+
+                    geom_obj = getattr(mesh.geometry, 'mesh', mesh.geometry)
+                    if hasattr(geom_obj, 'draw'): 
+                        geom_obj.draw()
+
+            draw_mask_list(self.queue.opaque)
+            draw_mask_list(self.queue.transparent)
+            
+            glEnable(GL_BLEND)
+            glEnable(GL_MULTISAMPLE)
+
+            glReadBuffer(GL_COLOR_ATTACHMENT0)
+            pixel_data = glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE)
+            
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            return pixel_data
 
     # =========================================================================
     # GPU COLOR PICKING PIPELINE
@@ -321,7 +403,6 @@ class Renderer:
                 if ent_idx == cam_idx:
                     continue
                 
-                # Bitwise conversion: Integer ID to distinct R, G, B float channels
                 r = (ent_idx & 0x000000FF) / 255.0
                 g = ((ent_idx & 0x0000FF00) >> 8) / 255.0
                 b = ((ent_idx & 0x00FF0000) >> 16) / 255.0
@@ -336,18 +417,15 @@ class Renderer:
         draw_picking_list(self.queue.transparent)
         draw_picking_list(self.queue.proxies)
 
-        # Translate Qt's top-left origin to OpenGL's bottom-left origin
         x = int(mx)
         y = int(height - my) 
         
         pixel_data = glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE)
         
-        # Restore normal rendering state machine
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         glEnable(GL_BLEND)
         glEnable(GL_MULTISAMPLE)
 
-        # Preserve the precise data unpacking format to avoid PyOpenGL compatibility bugs
         if pixel_data:
             r, g, b, a = pixel_data[0], pixel_data[1], pixel_data[2], pixel_data[3]
             

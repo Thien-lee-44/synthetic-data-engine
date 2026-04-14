@@ -5,6 +5,7 @@ from src.ui.views.panels.inspector_view import InspectorPanelView
 
 class InspectorController:
     """Coordinates data flow for the Properties (Inspector) panel."""
+    
     def __init__(self) -> None:
         self.view = InspectorPanelView(controller=self)
         ctx.events.subscribe(AppEvent.ENTITY_SELECTED, self.on_entity_selected)
@@ -30,7 +31,38 @@ class InspectorController:
 
     @safe_execute(context="Modify Property")
     def set_property(self, comp_name: str, prop: str, value: Any) -> None:
+        """Generic property setter routing to any ECS Component (Transform, Semantic, Animation...)."""
         ctx.engine.set_component_property(comp_name, prop, value)
+        ctx.events.emit(AppEvent.SCENE_CHANGED)
+
+    @safe_execute(context="Add Keyframe")
+    def add_keyframe(self, time: float) -> None:
+        self.request_undo_snapshot()
+        ctx.engine.set_component_property("Animation", "ADD_KEYFRAME", time)
+        ctx.events.emit(AppEvent.ENTITY_SELECTED, ctx.engine.get_selected_entity_id())
+        ctx.events.emit(AppEvent.SCENE_CHANGED)
+
+    @safe_execute(context="Remove Keyframe")
+    def remove_keyframe(self, index: int) -> None:
+        self.request_undo_snapshot()
+        ctx.engine.set_component_property("Animation", "REMOVE_KEYFRAME", index)
+        ctx.events.emit(AppEvent.ENTITY_SELECTED, ctx.engine.get_selected_entity_id())
+        ctx.events.emit(AppEvent.SCENE_CHANGED)
+
+    def get_semantic_classes(self) -> dict:
+        return ctx.engine.get_semantic_classes()
+
+    @safe_execute(context="Add Semantic Class")
+    def add_semantic_class(self, name: str) -> int:
+        self.request_undo_snapshot()
+        new_id = ctx.engine.add_semantic_class(name)
+        ctx.events.emit(AppEvent.SCENE_CHANGED)
+        return new_id
+
+    @safe_execute(context="Update Semantic Class Color")
+    def update_semantic_class_color(self, class_id: int, color: list) -> None:
+        self.request_undo_snapshot()
+        ctx.engine.update_semantic_class_color(class_id, color)
         ctx.events.emit(AppEvent.SCENE_CHANGED)
 
     @safe_execute(context="Reset Transform")

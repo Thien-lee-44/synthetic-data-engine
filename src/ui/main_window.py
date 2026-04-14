@@ -4,17 +4,23 @@ from PySide6.QtWidgets import (QMainWindow, QDockWidget, QWidget, QHBoxLayout,
                                QColorDialog, QMessageBox, QMenu)
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QKeySequence, QShortcut, QColor, QAction
-from typing import Any
+from typing import Any, Optional
 
 from src.app import ctx, AppEvent
 
-# Import SSOT configuration
-from src.app.config import APP_TITLE, DEFAULT_WINDOW_SIZE, DEFAULT_BG_COLOR, RENDER_MODE_COMBINED, RENDER_MODE_FLAT
+from src.app.config import (
+    APP_TITLE, 
+    DEFAULT_WINDOW_SIZE, 
+    DEFAULT_BG_COLOR, 
+    RENDER_MODE_COMBINED, 
+    RENDER_MODE_FLAT
+)
 
 class EditorMainWindow(QMainWindow):
     """
-    Shell interface of the application.
-    Assembles Docks, ToolBars, MenuBars and binds buttons to the MainController.
+    Main Application Shell.
+    Responsible for assembling Toolbars, Menus, and the Docking system.
+    Coordinates user interface interactions and delegates logic to the MainController.
     """
     def __init__(self, controller: Any) -> None:
         super().__init__()
@@ -22,24 +28,30 @@ class EditorMainWindow(QMainWindow):
         self.setWindowTitle(APP_TITLE)
         self.resize(*DEFAULT_WINDOW_SIZE)
         
-        # Global shortcut system
+        self.dock_math: Optional[QDockWidget] = None
+        self.hierarchy_view: Optional[QWidget] = None
+
+        self.create_menu_bar()
+        self.create_toolbar()
+        self._setup_shortcuts()
+        ctx.events.subscribe(AppEvent.ENTITY_SELECTED, self._on_entity_selected)
+
+    def _setup_shortcuts(self) -> None:
+        """Configures global hotkeys for Undo/Redo operations."""
         self.shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.shortcut_undo.activated.connect(self._controller.project_ctrl.undo)
         
         self.shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
         self.shortcut_redo.activated.connect(self._controller.project_ctrl.redo)
 
-        self.create_menu_bar()
-        self.create_toolbar()
-        
-        # Listen to object selection event to lock Scale/Rotate buttons for Proxies
-        ctx.events.subscribe(AppEvent.ENTITY_SELECTED, self._on_entity_selected)
-
     def set_central_viewport(self, viewport_widget: QWidget) -> None:
         self.gl_widget = viewport_widget
         self.setCentralWidget(self.gl_widget)
 
     def register_dock(self, panel_view: QWidget) -> None:
+        """
+        Wraps a Panel View into a QDockWidget and integrates it into the UI layout.
+        """
         title = getattr(panel_view, "PANEL_TITLE", "Panel")
         area = getattr(panel_view, "PANEL_DOCK_AREA", Qt.RightDockWidgetArea)
         
@@ -53,56 +65,45 @@ class EditorMainWindow(QMainWindow):
             self.hierarchy_view.setContextMenuPolicy(Qt.CustomContextMenu)
             self.hierarchy_view.customContextMenuRequested.connect(self.show_context_menu)
             
-        if title == "Math Generator":
+        elif title == "Math Generator":
             dock.setFeatures(dock.features() | QDockWidget.DockWidgetClosable)
             self.dock_math = dock
             self.dock_math.hide() 
 
     # =========================================================================
-    # CATCH EVENTS FROM ENGINE -> LOCK PROXY UI BUTTONS
+    # ENGINE EVENT HANDLERS -> UI STATE LOCKING
     # =========================================================================
 
     def _on_entity_selected(self, entity_id: int) -> None:
-        """Checks the object type and locks the corresponding Transform tools."""
         if entity_id < 0:
             return
             
         data = ctx.engine.get_selected_entity_data()
         if not data: return
         
-        # Unlock all
         self.rad_mov.setEnabled(True)
         self.rad_rot.setEnabled(True)
         self.rad_scl.setEnabled(True)
         
-        has_light = bool(data.get("light"))
-        has_cam = bool(data.get("cam"))
+        is_light = bool(data.get("light"))
+        is_cam = bool(data.get("cam"))
         
-        # Lock buttons based on light type (Proxy constraint)
-        if has_light:
+        if is_light:
             light_type = data["light"]["type"]
-            self.rad_scl.setEnabled(False) # Disable scaling for lights
-            if self.rad_scl.isChecked(): 
-                self.rad_mov.setChecked(True)
-                
+            self.rad_scl.setEnabled(False) 
+            
             if light_type == "Directional": 
-                self.rad_mov.setEnabled(False) # Disable moving for the sun (only allow rotation)
-                if self.rad_mov.isChecked(): 
-                    self.rad_rot.setChecked(True)
-                    
+                self.rad_mov.setEnabled(False) 
+                if self.rad_mov.isChecked(): self.rad_rot.setChecked(True)
             elif light_type == "Point": 
-                self.rad_rot.setEnabled(False) # Disable rotation for point lights (only allow movement)
-                if self.rad_rot.isChecked(): 
-                    self.rad_mov.setChecked(True)
+                self.rad_rot.setEnabled(False) 
+                if self.rad_rot.isChecked(): self.rad_mov.setChecked(True)
                     
-        # Lock buttons for Camera (Scaling is not allowed)
-        elif has_cam:
-            self.rad_scl.setEnabled(False) # Disable scaling for cameras
-            if self.rad_scl.isChecked(): 
-                self.rad_mov.setChecked(True)
+        elif is_cam:
+            self.rad_scl.setEnabled(False) 
 
     # =========================================================================
-    # SETUP MENUBAR & TOOLBAR UI
+    # MENU BAR & TOOLBAR CONSTRUCTION
     # =========================================================================
 
     def create_menu_bar(self) -> None:
@@ -122,121 +123,28 @@ class EditorMainWindow(QMainWindow):
         menu_3d = menu_add.addMenu("3D Primitives")
         for n in ctx.engine.get_3d_primitive_names():
             act = QAction(n, self)
-            act.setData(n) 
-            act.triggered.connect(self._on_spawn_primitive_3d)
+            act.triggered.connect(lambda checked=False, name=n: self._controller.spawn_primitive(name, False))
             menu_3d.addAction(act)
             
         menu_add.addSeparator()
-        menu_add.addAction("3D Math Surface").triggered.connect(lambda: (self.dock_math.show(), self.dock_math.raise_()))
+        menu_add.addAction("3D Math Surface").triggered.connect(
+            lambda: (self.dock_math.show(), self.dock_math.raise_()) if self.dock_math else None
+        )
         menu_add.addSeparator()
         
         menu_light = menu_add.addMenu("Lights")
         for label, ltype in [("Point Light", "Point"), ("Spot Light", "Spot"), ("Directional Light (Sun)", "Directional")]:
             act = QAction(label, self)
-            act.setData(ltype)
-            act.triggered.connect(self._on_add_light)
+            act.triggered.connect(lambda checked=False, lt=ltype: self._controller.add_light(
+                lt, self.chk_global_proxy.isChecked(), self.chk_global_light.isChecked()
+            ))
             menu_light.addAction(act)
             
         menu_add.addSeparator()
         menu_add.addAction("Camera").triggered.connect(lambda: self._controller.add_camera(self.chk_global_proxy.isChecked()))
 
-        menu_edit = menubar.addMenu("Edit")
-        menu_edit.addAction("Undo").triggered.connect(self._controller.project_ctrl.undo)
-        menu_edit.addAction("Redo").triggered.connect(self._controller.project_ctrl.redo)
-        menu_edit.addSeparator()
-        menu_edit.addAction("Copy", self.action_copy)
-        menu_edit.addAction("Cut", self.action_cut)
-        menu_edit.addAction("Paste", self.action_paste)
-        menu_edit.addAction("Delete", self.action_delete)
-
         menu_settings = menubar.addMenu("Settings")
         menu_settings.addAction("Background Color", self.action_change_bg_color)
-
-    # =========================================================================
-    # EVENT HANDLERS DELEGATING TO CONTROLLER
-    # =========================================================================
-
-    def _on_spawn_primitive_3d(self) -> None:
-        action = self.sender()
-        if isinstance(action, QAction):
-            name = action.data()
-            self._controller.spawn_primitive(name, False)
-
-    def _on_add_light(self) -> None:
-        action = self.sender()
-        if isinstance(action, QAction):
-            ltype = action.data()
-            # FIXED: Push the command directly, no unpack, no try/except needed
-            self._controller.add_light(
-                ltype, self.chk_global_proxy.isChecked(), self.chk_global_light.isChecked()
-            )
-
-    def show_context_menu(self, pos: QPoint) -> None:
-        menu = QMenu(self)
-        has_selection = (ctx.engine.get_selected_entity_id() >= 0)
-        
-        # --- ADD LOGIC TO CHECK VISIBILITY TOGGLE PERMISSION ---
-        can_toggle_vis = has_selection
-        if has_selection:
-            data = ctx.engine.get_selected_entity_data()
-            if data:
-                is_light = bool(data.get("light"))
-                is_cam = bool(data.get("cam"))
-                
-                # 1. Directional Light has no Proxy Mesh -> ALWAYS DISABLED
-                if is_light and data["light"].get("type") == "Directional":
-                    can_toggle_vis = False
-                    
-                # 2. Other lights or Camera -> Disabled if Global Proxy on Toolbar is OFF
-                elif (is_light or is_cam) and not self.chk_global_proxy.isChecked():
-                    can_toggle_vis = False
-        # ---------------------------------------------------------
-        
-        menu.addAction("Copy").triggered.connect(self.action_copy)
-        menu.addAction("Cut").triggered.connect(self.action_cut)
-        
-        act_paste = QAction("Paste", self)
-        act_paste.setEnabled(ctx.engine.has_clipboard())
-        act_paste.triggered.connect(self.action_paste)
-        menu.addAction(act_paste)
-        
-        menu.addSeparator()
-        act_vis = QAction("Toggle Visibility", self)
-        act_vis.setEnabled(can_toggle_vis)
-        act_vis.triggered.connect(self.action_toggle_visibility)
-        menu.addAction(act_vis)
-        
-        menu.addSeparator()
-        act_del = QAction("Delete", self)
-        act_del.setEnabled(has_selection)
-        act_del.triggered.connect(self.action_delete)
-        menu.addAction(act_del)
-        
-        if hasattr(self, 'hierarchy_view') and self.sender() == self.hierarchy_view:
-            menu.exec(self.hierarchy_view.mapToGlobal(pos))
-        else:
-            menu.exec(pos)
-
-    def action_copy(self) -> None: self._controller.copy_selected()
-    def action_cut(self) -> None: self._controller.cut_selected()
-    def action_delete(self) -> None: self._controller.delete_selected()
-    def action_toggle_visibility(self) -> None: self._controller.toggle_visibility_selected()
-
-    def action_paste(self) -> None: 
-        # FIXED: Only call Paste, any bypass errors will be caught by the Controller
-        self._controller.paste_copied()
-
-    def action_change_bg_color(self) -> None:
-        current_bg = getattr(self.gl_widget, 'bg_color', DEFAULT_BG_COLOR)
-        color = QColorDialog.getColor(QColor(int(current_bg[0]*255), int(current_bg[1]*255), int(current_bg[2]*255)), 
-                                      self, "Select Background Color")
-        if color.isValid():
-            self.gl_widget.bg_color = (color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0)
-            self.gl_widget.update() 
-
-    # =========================================================================
-    # SETUP TOOLBAR
-    # =========================================================================
 
     def create_toolbar(self) -> None:
         toolbar_tools = QToolBar("Transform Tools")
@@ -295,17 +203,14 @@ class EditorMainWindow(QMainWindow):
         lay_comb.setContentsMargins(0, 0, 0, 0)
         self.chk_comb_light = QCheckBox("+Lighting")
         self.chk_comb_light.setChecked(True)
-        self.chk_comb_light.stateChanged.connect(self._on_render_settings_changed)
         self.chk_comb_tex = QCheckBox("+Textures")
         self.chk_comb_tex.setChecked(True)
-        self.chk_comb_tex.stateChanged.connect(self._on_render_settings_changed)
         self.chk_comb_vcolor = QCheckBox("+Vertex Colors")
         self.chk_comb_vcolor.setChecked(True)
-        self.chk_comb_vcolor.stateChanged.connect(self._on_render_settings_changed)
         
-        lay_comb.addWidget(self.chk_comb_light)
-        lay_comb.addWidget(self.chk_comb_tex)
-        lay_comb.addWidget(self.chk_comb_vcolor)
+        for c in [self.chk_comb_light, self.chk_comb_tex, self.chk_comb_vcolor]:
+            c.stateChanged.connect(self._on_render_settings_changed)
+            lay_comb.addWidget(c)
         layout.addWidget(self.w_comb_opts)
         
         self.cmb_output = QComboBox()
@@ -315,6 +220,10 @@ class EditorMainWindow(QMainWindow):
         layout.addWidget(self.cmb_output)
 
         toolbar_view.addWidget(container)
+
+    # =========================================================================
+    # CONTROLLER DELEGATES (Bridge logic)
+    # =========================================================================
 
     def _on_tool_changed(self) -> None:
         if self.rad_rot.isChecked(): self._controller.set_manipulation_mode("ROTATE")
@@ -335,3 +244,51 @@ class EditorMainWindow(QMainWindow):
             tex=self.chk_comb_tex.isChecked(), 
             vcolor=self.chk_comb_vcolor.isChecked()
         )
+
+    def show_context_menu(self, pos: QPoint) -> None:
+        menu = QMenu(self)
+        has_selection = (ctx.engine.get_selected_entity_id() >= 0)
+        
+        can_toggle_vis = has_selection
+        if has_selection:
+            data = ctx.engine.get_selected_entity_data()
+            if data and data.get("light") and data["light"].get("type") == "Directional":
+                can_toggle_vis = False
+        
+        menu.addAction("Copy", self.action_copy)
+        menu.addAction("Cut", self.action_cut)
+        
+        act_paste = QAction("Paste", self)
+        act_paste.setEnabled(ctx.engine.has_clipboard())
+        act_paste.triggered.connect(self.action_paste)
+        menu.addAction(act_paste)
+        
+        menu.addSeparator()
+        act_vis = QAction("Toggle Visibility", self)
+        act_vis.setEnabled(can_toggle_vis)
+        act_vis.triggered.connect(self.action_toggle_visibility)
+        menu.addAction(act_vis)
+        
+        menu.addSeparator()
+        menu.addAction("Delete", self.action_delete).setEnabled(has_selection)
+        
+        if hasattr(self, 'hierarchy_view') and self.sender() == self.hierarchy_view:
+            menu.exec(self.hierarchy_view.mapToGlobal(pos))
+        else:
+            menu.exec(pos)
+
+    def action_copy(self) -> None: self._controller.copy_selected()
+    def action_cut(self) -> None: self._controller.cut_selected()
+    def action_paste(self) -> None: self._controller.paste_copied()
+    def action_delete(self) -> None: self._controller.delete_selected()
+    def action_toggle_visibility(self) -> None: self._controller.toggle_visibility_selected()
+
+    def action_change_bg_color(self) -> None:
+        current_bg = getattr(self.gl_widget, 'bg_color', DEFAULT_BG_COLOR)
+        color = QColorDialog.getColor(
+            QColor.fromRgbF(current_bg[0], current_bg[1], current_bg[2]), 
+            self, "Select Background Color"
+        )
+        if color.isValid():
+            self.gl_widget.bg_color = (color.redF(), color.greenF(), color.blueF())
+            self.gl_widget.update()

@@ -1,11 +1,10 @@
 from typing import Any, List, Optional
-from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QPushButton, QColorDialog
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
+                               QColorDialog, QFrame)
 from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt
 
-# Import from the new widgets directory
 from src.ui.widgets.custom_inputs import create_vec3_input
-
-# Import SSOT configuration
 from src.app.config import (
     COLOR_VEC_RANGE, COLOR_VEC_STEP, 
     STYLE_COLOR_BTN_DARK_TEXT, STYLE_COLOR_BTN_LIGHT_TEXT
@@ -17,7 +16,6 @@ def rgb_to_hex(c_list: List[float]) -> str:
     g = max(0, min(255, int(c_list[1] * 255)))
     b = max(0, min(255, int(c_list[2] * 255)))
     
-    # Calculate relative luminance to determine optimal text contrast (Rec. 601)
     lum = 0.299 * r + 0.587 * g + 0.114 * b
     base_style = STYLE_COLOR_BTN_DARK_TEXT if lum > 128 else STYLE_COLOR_BTN_LIGHT_TEXT
     
@@ -30,22 +28,73 @@ def set_vec3_spinboxes(spinboxes: List[Any], values: List[float]) -> None:
         spinboxes[i].setValue(values[i])
         spinboxes[i].blockSignals(False)
 
-class BaseComponentWidget(QGroupBox):
+
+class BaseComponentWidget(QWidget):
     """
     Parent class for all modular UI panels within the Inspector.
-    Standardizes layout margins, title formatting, and color picking utility logic.
+    Implements a collapsible accordion architecture to optimize vertical screen space.
+    Subclasses seamlessly inject their specific forms into the internal 'self.layout'.
     """
     def __init__(self, title: str, controller: Any) -> None:
-        super().__init__(title)
+        super().__init__()
         self._controller = controller
-        self.layout = QVBoxLayout(self)
+        self._is_collapsed: bool = False
+        self._title_text: str = title
+
+        self._main_layout = QVBoxLayout(self)
+        self._main_layout.setContentsMargins(0, 0, 0, 0)
+        self._main_layout.setSpacing(0)
+
+        # 1. Collapsible Header Button
+        self.btn_toggle = QPushButton()
+        self.btn_toggle.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle.setStyleSheet("""
+            QPushButton {
+                background-color: #333333;
+                color: #E0E0E0;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 10px;
+                text-align: left;
+                font-weight: bold;
+                font-size: 12px;
+                margin-top: 6px;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+            }
+        """)
+        self._update_button_text()
+        self.btn_toggle.clicked.connect(self._on_toggle)
+        self._main_layout.addWidget(self.btn_toggle)
+
+        # 2. Content Container (Wrapped in QFrame to allow hiding)
+        self.content_container = QFrame()
         
-        # Consistent vertical spacing across all inspector sub-panels
-        self.layout.setContentsMargins(5, 10, 5, 5)
-        self.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; margin-top: 10px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 3px; }")
+        # 3. Public Layout (Child widgets will automatically inject here)
+        self.layout = QVBoxLayout(self.content_container)
+        self.layout.setContentsMargins(10, 8, 0, 8) 
+        self.layout.setSpacing(4)
+
+        self._main_layout.addWidget(self.content_container)
+
+    def _update_button_text(self) -> None:
+        """Updates the visual indicator based on the current collapse state."""
+        arrow = "►" if self._is_collapsed else "▼"
+        self.btn_toggle.setText(f"{arrow}  {self._title_text}")
+
+    def _on_toggle(self) -> None:
+        """Handles the state mutation and triggers layout recalculation."""
+        self._is_collapsed = not self._is_collapsed
+        self.content_container.setVisible(not self._is_collapsed)
+        self._update_button_text()
+
+    # =========================================================================
+    # LEGACY UTILITIES (Maintained for child class backward compatibility)
+    # =========================================================================
 
     def request_undo_snapshot(self) -> None:
-        """Shared function to request the Controller to snapshot the scene before the user modifies values."""
+        """Shared function to request the Controller to snapshot the scene before value modification."""
         if self._controller and hasattr(self._controller, 'request_undo_snapshot'):
             self._controller.request_undo_snapshot()
 
