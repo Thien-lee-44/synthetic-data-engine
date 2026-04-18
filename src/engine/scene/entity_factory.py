@@ -1,6 +1,6 @@
 import os
 import glm
-from typing import Any
+from typing import Any, Optional, Dict, List
 from src.engine.scene.entity import Entity
 from src.engine.scene.components import TransformComponent, MeshRenderer, LightComponent, CameraComponent
 from src.engine.geometry.primitives import PrimitivesManager
@@ -8,7 +8,14 @@ from src.engine.resources.resource_manager import ResourceManager
 from src.engine.graphics.buffer_objects import BufferObject
 
 from src.app.exceptions import SimulationError, ResourceError
-from src.app.config import MAX_LIGHTS, DEFAULT_GROUP_NAME, DEFAULT_PROXY_SCALE
+from src.app.config import (
+    MAX_LIGHTS,
+    DEFAULT_GROUP_NAME,
+    DEFAULT_PROXY_SCALE,
+    DEFAULT_CAMERA_NAME,
+    DEFAULT_SCENE_CAM_POS,
+    DEFAULT_SCENE_LIGHT_ROT,
+)
 
 class EntityFactory:
     """
@@ -18,6 +25,48 @@ class EntityFactory:
     
     def __init__(self, scene: Any) -> None:
         self.scene = scene
+
+    def setup_default_scene(self) -> None:
+        """
+        Creates the default camera, default directional light, and default cube.
+        """
+        cam = Entity(DEFAULT_CAMERA_NAME)
+        tf = cam.add_component(TransformComponent())
+        tf.position = glm.vec3(*DEFAULT_SCENE_CAM_POS)
+        tf.scale = glm.vec3(DEFAULT_PROXY_SCALE)
+
+        cam_comp = CameraComponent(mode="Perspective")
+        cam_comp.is_active = True
+        cam.add_component(cam_comp)
+
+        renderer = cam.add_component(MeshRenderer())
+        renderer.is_proxy = True
+
+        proxy_path = PrimitivesManager.get_proxy_path("proxy_camera.ply")
+        if os.path.exists(proxy_path):
+            mesh_list = ResourceManager.get_model(proxy_path)
+            if mesh_list:
+                sub = mesh_list[0]
+                geom = BufferObject(sub.vertices, sub.indices, sub.vertex_size)
+                geom.filepath = proxy_path
+                renderer.geometry = geom
+
+        self.scene.add_entity(cam)
+
+        light = Entity("Directional Light")
+        tf = light.add_component(TransformComponent())
+        tf.rotation = glm.vec3(*DEFAULT_SCENE_LIGHT_ROT)
+        tf.quat_rot = glm.quat(glm.radians(tf.rotation))
+        light.add_component(LightComponent(light_type="Directional"))
+        self.scene.add_entity(light)
+
+        cube_entity = Entity("Default Cube")
+        cube_entity.add_component(TransformComponent())
+        renderer = cube_entity.add_component(MeshRenderer())
+        geom = PrimitivesManager.get_primitive("Cube")
+        if geom:
+            renderer.geometry = geom
+        self.scene.add_entity(cube_entity)
 
     def add_empty_group(self) -> None:
         """Spawns an empty transform node primarily used for hierarchical grouping."""
@@ -57,10 +106,7 @@ class EntityFactory:
         self.scene.add_entity(ent)
 
     def add_light(self, light_type: str, proxy_enabled: bool, global_light_on: bool) -> None:
-        """
-        Instantiates a light source. Actively enforces architectural limits on the maximum 
-        allowable lights per type to prevent buffer overflow in the GLSL forward renderer.
-        """
+        """Instantiates a light source. Lights are NEVER given a SemanticComponent."""
         current_count = sum(1 for _, l, _ in self.scene.cached_lights if l.type == light_type)
         limit = MAX_LIGHTS.get(light_type, 0)
         
@@ -70,10 +116,20 @@ class EntityFactory:
         ent = Entity(f"{light_type} Light")
         tf = ent.add_component(TransformComponent())
         
+        # [CONSTRAINT RULES]
+        if light_type == "Directional":
+            tf.locked_axes["pos"] = True
+            tf.locked_axes["scl"] = True
+        elif light_type == "Point":
+            tf.locked_axes["rot"] = True
+            tf.locked_axes["scl"] = True
+        elif light_type == "Spot":
+            tf.locked_axes["scl"] = True
+        
+        
         light_comp = ent.add_component(LightComponent(light_type=light_type))
         light_comp.on = global_light_on
         
-        # Directional lights do not require physical positional proxies in the scene space
         if light_type != "Directional":
             renderer = ent.add_component(MeshRenderer())
             renderer.is_proxy = True
@@ -89,9 +145,11 @@ class EntityFactory:
         self.scene.add_entity(ent)
 
     def add_camera(self, proxy_enabled: bool) -> None:
-        """Instantiates an auxiliary view frustum entity into the scene."""
+        """Instantiates an auxiliary view frustum. Cameras are NEVER given a SemanticComponent."""
         ent = Entity("Camera")
         tf = ent.add_component(TransformComponent())
+        tf.locked_axes["scl"] = True  # [CONSTRAINT]
+        
         
         cam = ent.add_component(CameraComponent(mode="Perspective"))
         cam.is_active = not any(e.get_component(CameraComponent) for e in self.scene.entities)
@@ -106,52 +164,92 @@ class EntityFactory:
 
     def spawn_model_from_path(self, path: str) -> None:
         """
-        Parses a 3D asset file from disk and translates its topological sub-meshes 
-        into a corresponding hierarchy of ECS entities.
+        Parses a 3D asset and assembles a hierarchical structure.
+        Automatically calculates the group center to align Gizmos with the collective children.
+        Optimized to reuse cached OpenGL BufferObjects directly, preventing memory leaks 
+        and fixing disappearing mesh bugs.
         """
         try:
             mesh_data_list = ResourceManager.get_model(path)
             raw_name = os.path.splitext(os.path.basename(path))[0]
             display_name = raw_name.replace('_', ' ').title()
 
-            if len(mesh_data_list) > 1:
-                # Spawn a logical parent container to group multi-part models
-                parent_ent = Entity(display_name, is_group=True)
-                parent_ent.add_component(TransformComponent())
-                self.scene.add_entity(parent_ent)
+            buckets: Dict[str, List[Any]] = {}
+            all_child_positions = []
+
+            for sub_data in mesh_data_list:
+                g_name = getattr(sub_data, 'group_name', display_name)
+                if g_name not in buckets:
+                    buckets[g_name] = []
+                buckets[g_name].append(sub_data)
+                if hasattr(sub_data, 'pivot_offset'):
+                    all_child_positions.append(glm.vec3(*sub_data.pivot_offset))
+
+            master_center = glm.vec3(0.0)
+            if all_child_positions:
+                min_p = glm.vec3(min(p.x for p in all_child_positions), min(p.y for p in all_child_positions), min(p.z for p in all_child_positions))
+                max_p = glm.vec3(max(p.x for p in all_child_positions), max(p.y for p in all_child_positions), max(p.z for p in all_child_positions))
+                master_center = (min_p + max_p) / 2.0
+
+            master_ent = Entity(display_name, is_group=True)
+            master_tf = master_ent.add_component(TransformComponent())
+            master_tf.position = master_center 
+            master_tf.locked_axes["scl"] = True  # [CONSTRAINT] Prevent global hierarchy shearing
+            
+            
+            # [CRITICAL FIX]: Collect all structured entities first before flushing to Scene
+            entities_to_add = [master_ent]
+
+            for g_name, meshes in buckets.items():
+                obj_world_positions = [glm.vec3(*m.pivot_offset) for m in meshes if hasattr(m, 'pivot_offset')]
+                if not obj_world_positions: continue
                 
-                for sub_data in mesh_data_list:
-                    child_ent = Entity(getattr(sub_data, 'name', 'SubMesh'))
-                    child_ent.add_component(TransformComponent())
-                    
-                    renderer = child_ent.add_component(MeshRenderer())
-                    renderer.geometry = BufferObject(sub_data.vertices, sub_data.indices, vertex_size=sub_data.vertex_size)
-                    renderer.geometry.filepath = path
-                    renderer.geometry.name = getattr(sub_data, 'name', '')
-                    
-                    if hasattr(sub_data, 'materials') and 'default_active' in sub_data.materials:
-                        renderer.material.setup_from_dict(sub_data.materials['default_active'])
-                            
-                    parent_ent.add_child(child_ent, keep_world=False)
-                    self.scene.add_entity(child_ent)
-                    
-                self.scene.selected_index = self.scene.entities.index(parent_ent)
-            else:
-                # Spawn solitary monolithic mesh
-                ent = Entity(display_name)
-                ent.add_component(TransformComponent())
+                obj_world_center = sum(obj_world_positions, glm.vec3(0.0)) / len(obj_world_positions)
                 
-                renderer = ent.add_component(MeshRenderer())
-                sub_data = mesh_data_list[0]
+                is_multi_part = len(meshes) > 1
+                obj_ent = Entity(g_name, is_group=is_multi_part)
                 
-                renderer.geometry = BufferObject(sub_data.vertices, sub_data.indices, vertex_size=sub_data.vertex_size)
-                renderer.geometry.filepath = path
-                renderer.geometry.name = getattr(sub_data, 'name', '')
+                obj_tf = obj_ent.add_component(TransformComponent())
+                obj_tf.position = obj_world_center - master_center
+                if is_multi_part:
+                    obj_tf.locked_axes["scl"] = True  # [CONSTRAINT]
                 
-                if hasattr(sub_data, 'materials') and 'default_active' in sub_data.materials:
-                    renderer.material.setup_from_dict(sub_data.materials['default_active'])
+                
+                master_ent.add_child(obj_ent, keep_world=False)
+                entities_to_add.append(obj_ent)
+
+                for sub_data in meshes:
+                    if is_multi_part:
+                        child_ent = Entity(getattr(sub_data, 'name', 'SubMesh'))
+                        child_tf = child_ent.add_component(TransformComponent())
+                        child_tf.position = glm.vec3(*sub_data.pivot_offset) - obj_world_center
                         
+                        
+                        renderer = child_ent.add_component(MeshRenderer())
+                        
+                        # [CRITICAL FIX]: Directly reference the cached Geometry.
+                        # Do NOT call BufferObject() here, as it duplicates RAM/VRAM and crashes GL State.
+                        renderer.geometry = sub_data 
+                        
+                        if hasattr(sub_data, 'materials') and 'default_active' in sub_data.materials:
+                            renderer.material.setup_from_dict(sub_data.materials['default_active'])
+                                
+                        obj_ent.add_child(child_ent, keep_world=False)
+                        entities_to_add.append(child_ent)
+                    else:
+                        renderer = obj_ent.add_component(MeshRenderer())
+                        
+                        # [CRITICAL FIX]: Directly reference the cached Geometry.
+                        renderer.geometry = sub_data
+                        
+                        if hasattr(sub_data, 'materials') and 'default_active' in sub_data.materials:
+                            renderer.material.setup_from_dict(sub_data.materials['default_active'])
+
+            # Dispatch all newly assembled entities to the Scene in a synchronized batch
+            for ent in entities_to_add:
                 self.scene.add_entity(ent)
-                
+
+            self.scene.selected_index = self.scene.entities.index(master_ent)
+            
         except Exception as e:
             raise ResourceError(f"Failed to instantiate model hierarchy from '{path}'.\nReason: {e}")

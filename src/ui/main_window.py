@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QMainWindow, QDockWidget, QWidget, QHBoxLayout,
                                QColorDialog, QMessageBox, QMenu)
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QKeySequence, QShortcut, QColor, QAction
-from typing import Any
+from typing import Any, Optional
 
 from src.app import ctx, AppEvent
 
@@ -21,19 +21,24 @@ class EditorMainWindow(QMainWindow):
         self._controller = controller
         self.setWindowTitle(APP_TITLE)
         self.resize(*DEFAULT_WINDOW_SIZE)
-        
-        # Global shortcut system
-        self.shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
-        self.shortcut_undo.activated.connect(self._controller.project_ctrl.undo)
-        
-        self.shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
-        self.shortcut_redo.activated.connect(self._controller.project_ctrl.redo)
+
+        self.dock_math: Optional[QDockWidget] = None
+        self.hierarchy_view: Optional[QWidget] = None
 
         self.create_menu_bar()
         self.create_toolbar()
+        self._setup_shortcuts()
         
         # Listen to object selection event to lock Scale/Rotate buttons for Proxies
         ctx.events.subscribe(AppEvent.ENTITY_SELECTED, self._on_entity_selected)
+
+    def _setup_shortcuts(self) -> None:
+        """Configures global keyboard shortcuts."""
+        self.shortcut_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.shortcut_undo.activated.connect(self._controller.project_ctrl.undo)
+
+        self.shortcut_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self.shortcut_redo.activated.connect(self._controller.project_ctrl.redo)
 
     def set_central_viewport(self, viewport_widget: QWidget) -> None:
         self.gl_widget = viewport_widget
@@ -53,7 +58,7 @@ class EditorMainWindow(QMainWindow):
             self.hierarchy_view.setContextMenuPolicy(Qt.CustomContextMenu)
             self.hierarchy_view.customContextMenuRequested.connect(self.show_context_menu)
             
-        if title == "Math Generator":
+        elif title == "Math Generator":
             dock.setFeatures(dock.features() | QDockWidget.DockWidgetClosable)
             self.dock_math = dock
             self.dock_math.hide() 
@@ -126,8 +131,17 @@ class EditorMainWindow(QMainWindow):
             act.triggered.connect(self._on_spawn_primitive_3d)
             menu_3d.addAction(act)
             
+        menu_2d = menu_add.addMenu("2D Primitives")
+        for n in ctx.engine.get_2d_primitive_names():
+            act = QAction(n, self)
+            act.setData(n)
+            act.triggered.connect(self._on_spawn_primitive_2d)
+            menu_2d.addAction(act)
+            
         menu_add.addSeparator()
-        menu_add.addAction("3D Math Surface").triggered.connect(lambda: (self.dock_math.show(), self.dock_math.raise_()))
+        menu_add.addAction("3D Math Surface").triggered.connect(
+            lambda: (self.dock_math.show(), self.dock_math.raise_()) if self.dock_math else None
+        )
         menu_add.addSeparator()
         
         menu_light = menu_add.addMenu("Lights")
@@ -161,6 +175,12 @@ class EditorMainWindow(QMainWindow):
         if isinstance(action, QAction):
             name = action.data()
             self._controller.spawn_primitive(name, False)
+
+    def _on_spawn_primitive_2d(self) -> None:
+        action = self.sender()
+        if isinstance(action, QAction):
+            name = action.data()
+            self._controller.spawn_primitive(name, True)
 
     def _on_add_light(self) -> None:
         action = self.sender()
@@ -205,6 +225,22 @@ class EditorMainWindow(QMainWindow):
         act_vis.setEnabled(can_toggle_vis)
         act_vis.triggered.connect(self.action_toggle_visibility)
         menu.addAction(act_vis)
+
+        menu.addSeparator()
+        group_count = len(getattr(self._controller.hierarchy_ctrl, "selected_multi_ids", []))
+        act_group = QAction("Group Selected", self)
+        act_group.setEnabled(group_count > 1)
+        act_group.triggered.connect(self._controller.group_selected)
+        menu.addAction(act_group)
+
+        act_ungroup = QAction("Ungroup", self)
+        can_ungroup = False
+        if has_selection:
+            data = ctx.engine.get_selected_entity_data()
+            can_ungroup = bool(data and data.get("is_group"))
+        act_ungroup.setEnabled(can_ungroup)
+        act_ungroup.triggered.connect(self._controller.ungroup_selected)
+        menu.addAction(act_ungroup)
         
         menu.addSeparator()
         act_del = QAction("Delete", self)

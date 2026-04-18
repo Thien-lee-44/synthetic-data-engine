@@ -53,6 +53,26 @@ class MainController:
         ctx.events.emit(AppEvent.ENTITY_SELECTED, ctx.engine.get_selected_entity_id())
         ctx.events.emit(AppEvent.SCENE_CHANGED)
 
+    @safe_execute(context="Group Entities")
+    def group_selected(self) -> None:
+        ids = self.hierarchy_ctrl.selected_multi_ids
+        if len(ids) > 1:
+            ctx.events.emit(AppEvent.ACTION_BEFORE_MUTATION)
+            ctx.engine.group_selected_entities(ids)
+            ctx.events.emit(AppEvent.HIERARCHY_NEEDS_REFRESH)
+            ctx.events.emit(AppEvent.ENTITY_SELECTED, ctx.engine.get_selected_entity_id())
+            ctx.events.emit(AppEvent.SCENE_CHANGED)
+
+    @safe_execute(context="Ungroup Entity")
+    def ungroup_selected(self) -> None:
+        idx = ctx.engine.get_selected_entity_id()
+        if idx >= 0:
+            ctx.events.emit(AppEvent.ACTION_BEFORE_MUTATION)
+            ctx.engine.ungroup_selected_entity()
+            ctx.events.emit(AppEvent.HIERARCHY_NEEDS_REFRESH)
+            ctx.events.emit(AppEvent.ENTITY_SELECTED, ctx.engine.get_selected_entity_id())
+            ctx.events.emit(AppEvent.SCENE_CHANGED)
+
     @safe_execute(context="Spawn Primitive")
     def spawn_primitive(self, name: str, is_2d: bool) -> None:
         ctx.events.emit(AppEvent.ACTION_BEFORE_MUTATION)

@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QTreeWidget, QTreeWidgetItem, QAbstractItemView)
 from PySide6.QtCore import Qt, QMimeData, QSize, QPoint
-from PySide6.QtGui import QDropEvent
+from PySide6.QtGui import QDropEvent, QMouseEvent
 from typing import Any, List, Dict, Optional
 import os
 
@@ -69,21 +69,29 @@ class AssetListWidget(QListWidget):
 
 class EntityTreeWidget(QTreeWidget):
     """
-    Custom QTreeWidget supporting internal Drag-and-Drop tree reordering.
-    Evaluates the new Parent-Child relationships and dispatches the mapping to the Controller.
+    Custom QTreeWidget supporting hierarchy drag-drop and multi-selection.
     """
     def __init__(self, controller: Any) -> None:
         super().__init__()
         self._controller = controller 
         
         self.setHeaderHidden(True)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
         # Enable Qt's internal Drag-and-Drop mechanics
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
         self.setDragDropMode(QAbstractItemView.InternalMove)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        modifiers = event.modifiers()
+        if modifiers & (Qt.ControlModifier | Qt.ShiftModifier):
+            self.setDragDropMode(QAbstractItemView.NoDragDrop)
+            super().mousePressEvent(event)
+            self.setDragDropMode(QAbstractItemView.InternalMove)
+        else:
+            super().mousePressEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
         """Overrides the Drop event to synchronize the visual tree changes with the underlying ECS."""
@@ -104,5 +112,5 @@ class EntityTreeWidget(QTreeWidget):
             traverse(self.topLevelItem(i), None)
             
         # 3. Dispatch the comprehensive mapping array to the Controller
-        if self._controller:
+        if self._controller and hasattr(self._controller, 'handle_hierarchy_reorder'):
             self._controller.handle_hierarchy_reorder(hierarchy_mapping)
