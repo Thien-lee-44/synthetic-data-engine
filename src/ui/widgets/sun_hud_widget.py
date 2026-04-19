@@ -8,7 +8,7 @@ from src.app import ctx
 from src.ui.controllers.viewport_ctrl import ViewportController
 
 # Import centralized HUD sizing
-from src.app.config import SUN_HUD_MIN_HEIGHT
+from src.app.config import SUN_HUD_MIN_HEIGHT, TARGET_FPS
 
 class SunHUDWidget(QOpenGLWidget):
     """
@@ -28,7 +28,8 @@ class SunHUDWidget(QOpenGLWidget):
         # The HUD requires a constant framerate for continuous arcball redrawing (effectively unlocking the render loop)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
-        self.timer.start(0)
+        hud_interval = max(1, int(1000 / max(TARGET_FPS, 1)))
+        self.timer.start(hud_interval)
 
     # =========================================================================
     # OPENGL LIFECYCLE EVENTS (Communicates with the Engine via global ctx)

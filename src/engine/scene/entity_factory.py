@@ -116,17 +116,6 @@ class EntityFactory:
         ent = Entity(f"{light_type} Light")
         tf = ent.add_component(TransformComponent())
         
-        # [CONSTRAINT RULES]
-        if light_type == "Directional":
-            tf.locked_axes["pos"] = True
-            tf.locked_axes["scl"] = True
-        elif light_type == "Point":
-            tf.locked_axes["rot"] = True
-            tf.locked_axes["scl"] = True
-        elif light_type == "Spot":
-            tf.locked_axes["scl"] = True
-        
-        
         light_comp = ent.add_component(LightComponent(light_type=light_type))
         light_comp.on = global_light_on
         
@@ -134,6 +123,13 @@ class EntityFactory:
             renderer = ent.add_component(MeshRenderer())
             renderer.is_proxy = True
             renderer.visible = proxy_enabled
+
+            # Lock only proxy transform modes (do not lock regular entities/groups)
+            if light_type == "Point":
+                tf.locked_axes["rot"] = True
+                tf.locked_axes["scl"] = True
+            elif light_type == "Spot":
+                tf.locked_axes["scl"] = True
             
             if light_type == "Point": 
                 renderer.geometry = PrimitivesManager.get_proxy("proxy_point.ply")
@@ -194,7 +190,6 @@ class EntityFactory:
             master_ent = Entity(display_name, is_group=True)
             master_tf = master_ent.add_component(TransformComponent())
             master_tf.position = master_center 
-            master_tf.locked_axes["scl"] = True  # [CONSTRAINT] Prevent global hierarchy shearing
             
             
             # [CRITICAL FIX]: Collect all structured entities first before flushing to Scene
@@ -211,8 +206,6 @@ class EntityFactory:
                 
                 obj_tf = obj_ent.add_component(TransformComponent())
                 obj_tf.position = obj_world_center - master_center
-                if is_multi_part:
-                    obj_tf.locked_axes["scl"] = True  # [CONSTRAINT]
                 
                 
                 master_ent.add_child(obj_ent, keep_world=False)
