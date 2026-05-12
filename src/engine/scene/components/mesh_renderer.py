@@ -1,9 +1,17 @@
+"""
+Mesh Renderer Component.
+
+Couples raw geometric vertex data (BufferObject) with surface physical properties (Material).
+Serves as the primary identifier for objects meant to be pushed into the render queue.
+"""
+
 import os
 import glm
 from typing import Dict, Any, Optional
+import copy
+
 from src.engine.scene.entity import Component
 from src.engine.graphics.material import Material
-
 from src.app.config import (
     DEFAULT_MATH_RANGE, DEFAULT_MATH_RESOLUTION,
     DEFAULT_MAT_AMBIENT, DEFAULT_MAT_DIFFUSE, DEFAULT_MAT_SPECULAR, 
@@ -12,10 +20,10 @@ from src.app.config import (
     DEFAULT_MAT_SPEC_STRENGTH
 )
 
+
 class MeshRenderer(Component):
     """
-    Couples raw geometric vertex data (BufferObject) with surface physical properties (Material).
-    Serves as the primary identifier for objects meant to be pushed into the rendering pipeline.
+    Manages the rendering state for an entity, including visibility and mesh bindings.
     """
     
     def __init__(self) -> None:
@@ -29,11 +37,9 @@ class MeshRenderer(Component):
 
     def __deepcopy__(self, memo: dict) -> 'MeshRenderer':
         """
-        Custom deep clone implementation required for prefab instantiation.
-        Ensures materials are duplicated uniquely while Geometry pointers (BufferObjects) 
-        can be shared across instances to save VRAM.
+        Deep clone implementation required for prefab instantiation.
+        Duplicates materials uniquely but shares geometry pointers to save VRAM.
         """
-        import copy
         new_obj = type(self)()
         memo[id(self)] = new_obj
         
@@ -45,27 +51,19 @@ class MeshRenderer(Component):
         return new_obj
 
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Serializes mesh references and material configuration.
-        Defines precise logic to identify the origin of the geometry (e.g., File path vs 
-        Procedural primitive vs Mathematical surface) to ensure accurate reconstruction.
-        """
-        from src.engine.resources.resource_manager import ResourceManager
-        from src.engine.geometry.primitives import PrimitivesManager
-        
+        """Serializes geometry routes and material properties."""
         data = {
             "visible": self.visible, 
-            "is_proxy": getattr(self, 'is_proxy', False)
+            "is_proxy": getattr(self, 'is_proxy', False),
+            "geom_type": "none"
         }
         
-        # Geometry Origin Serialization
+        # Route Geometry Types
         if self.geometry:
-            if hasattr(self.geometry, 'filepath') and self.geometry.filepath and not self.is_proxy:
-                # Loaded from an external disk asset (.obj, .ply)
-                data["geometry_path"] = self.geometry.filepath
-                data["submesh_name"] = getattr(self.geometry, 'name', '')
-            elif hasattr(self.geometry, 'formula_str'):
-                # Procedurally generated Math Surface
+            geom_name = getattr(self.geometry, 'name', '')
+            
+            if hasattr(self.geometry, 'formula_str'):
+                data["geom_type"] = "math"
                 data["math_formula"] = self.geometry.formula_str
                 data["math_ranges"] = [
                     getattr(self.geometry, 'x_range', list(DEFAULT_MATH_RANGE)),
@@ -73,68 +71,62 @@ class MeshRenderer(Component):
                     getattr(self.geometry, 'resolution', DEFAULT_MATH_RESOLUTION)
                 ]
             elif self.is_proxy:
-                # Editor utility proxy
-                data["proxy_path"] = getattr(self.geometry, 'filepath', '') or getattr(self.geometry, 'name', '')
+                data["geom_type"] = "proxy"
+                data["proxy_path"] = getattr(self.geometry, 'filepath', '') or geom_name
+                
+            elif hasattr(self.geometry, 'filepath') and getattr(self.geometry, 'filepath', ''):
+                data["geom_type"] = "model"
+                data["geometry_path"] = self.geometry.filepath
+                data["submesh_name"] = geom_name
+                
             else:
-                # Standard hardcoded primitive (Cube, Sphere, etc.)
-                prim_name = None
-                for k, v in PrimitivesManager.get_3d_paths().items():
-                    if v == self.geometry: 
-                        prim_name = k
-                        break
-                if not prim_name:
-                    for k, v in PrimitivesManager.get_2d_paths().items():
-                        if v == self.geometry: 
-                            prim_name = k
-                            break
-                if prim_name: 
-                    data["primitive_name"] = prim_name
+                data["geom_type"] = "primitive"
+                data["primitive_name"] = geom_name or "Cube"
 
-        # Material State Serialization
+        # Serialize Material Configuration
         mat = self.material
+        data["mat_use_advanced_mode"] = getattr(mat, 'use_advanced_mode', False)
+        data["mat_ambient_strength"] = float(getattr(mat, 'ambient_strength', DEFAULT_MAT_AMB_STRENGTH))
+        data["mat_diffuse_strength"] = float(getattr(mat, 'diffuse_strength', DEFAULT_MAT_DIFF_STRENGTH))
+        data["mat_specular_strength"] = float(getattr(mat, 'specular_strength', DEFAULT_MAT_SPEC_STRENGTH))
+        data["mat_shininess"] = float(getattr(mat, 'shininess', DEFAULT_MAT_SHININESS))
+        data["mat_opacity"] = float(getattr(mat, 'opacity', DEFAULT_MAT_OPACITY))
         
-        data["use_adv"] = getattr(mat, 'use_advanced_mode', False)
-        data["amb_s"] = getattr(mat, 'ambient_strength', DEFAULT_MAT_AMB_STRENGTH)
-        data["diff_s"] = getattr(mat, 'diffuse_strength', DEFAULT_MAT_DIFF_STRENGTH)
-        data["spec_s"] = getattr(mat, 'specular_strength', DEFAULT_MAT_SPEC_STRENGTH)
-        data["shine"] = getattr(mat, 'shininess', DEFAULT_MAT_SHININESS)
-        data["opacity"] = getattr(mat, 'opacity', DEFAULT_MAT_OPACITY)
+        data["mat_base_color"] = list(mat.base_color)
+        data["mat__ambient"] = list(mat._ambient)
+        data["mat__diffuse"] = list(mat._diffuse)
+        data["mat__specular"] = list(mat._specular)
+        data["mat_emission"] = list(mat.emission)
         
-        data["base_c"] = list(mat.base_color)
-        data["amb_c"] = list(mat._ambient)
-        data["diff_c"] = list(mat._diffuse)
-        data["spec_c"] = list(mat._specular)
-        data["emis_c"] = list(mat.emission)
-        
-        # Serialize strictly through the tex_paths dictionary
-        data["tex_paths"] = getattr(mat, 'tex_paths', {})
+        data["mat_tex_paths"] = mat.get_tex_paths_snapshot() if hasattr(mat, 'get_tex_paths_snapshot') else {}
         
         return data
 
     def from_dict(self, data: Dict[str, Any]) -> None:
-        """
-        Deserializes layout configurations and dynamically requests the ResourceManager 
-        to rebuild missing geometry/texture objects into VRAM.
-        """
-        from src.engine.resources.resource_manager import ResourceManager
+        """Deserializes configurations and requests asset restitution from the ResourceManager."""
+        # Inline imports to prevent circular dependencies during boot
         from src.engine.geometry.primitives import PrimitivesManager
         
         self.visible = bool(data.get("visible", True))
         self.is_proxy = bool(data.get("is_proxy", False))
         
-        # Geometry Restitution Logic
-        if "geometry_path" in data:
-            path = data["geometry_path"]
+        geom_type = data.get("geom_type", "none")
+
+        if geom_type == "model":
+            path = data.get("geometry_path", "")
             sub_name = data.get("submesh_name", "")
             if os.path.exists(path):
+                from src.engine.resources.resource_manager import ResourceManager
                 mesh_list = ResourceManager.get_model(path)
-                self.geometry = next((m for m in mesh_list if getattr(m, 'name', '') == sub_name), mesh_list[0]) if mesh_list else None
-        elif "primitive_name" in data:
-            geom = PrimitivesManager.get_primitive(data["primitive_name"], False)
-            if not geom: 
-                geom = PrimitivesManager.get_primitive(data["primitive_name"], True)
+                if mesh_list:
+                    self.geometry = next((m for m in mesh_list if getattr(m, 'name', '') == sub_name), mesh_list[0])
+        
+        elif geom_type == "primitive":
+            p_name = data.get("primitive_name", "Cube")
+            geom = PrimitivesManager.get_primitive(p_name, False) or PrimitivesManager.get_primitive(p_name, True)
             self.geometry = geom
-        elif "math_formula" in data:
+            
+        elif geom_type == "math":
             try:
                 from src.engine.geometry.math_surface import MathSurface
                 f = data["math_formula"]
@@ -143,31 +135,24 @@ class MeshRenderer(Component):
                 self.geometry.formula_str = f
             except Exception: 
                 pass
-        elif "proxy_path" in data:
-            path = data["proxy_path"]
-            if "proxy" in path: 
+                
+        elif geom_type == "proxy":
+            path = data.get("proxy_path", "")
+            if path:
                 self.geometry = PrimitivesManager.get_proxy(os.path.basename(path))
 
-        # Material Restitution Logic
         mat = self.material
-        mat.use_advanced_mode = data.get("use_adv", False)
-        mat.ambient_strength = data.get("amb_s", DEFAULT_MAT_AMB_STRENGTH)
-        mat.diffuse_strength = data.get("diff_s", DEFAULT_MAT_DIFF_STRENGTH)
-        mat.specular_strength = data.get("spec_s", DEFAULT_MAT_SPEC_STRENGTH)
-        mat.shininess = data.get("shine", DEFAULT_MAT_SHININESS)
-        mat.opacity = data.get("opacity", DEFAULT_MAT_OPACITY)
+        mat.use_advanced_mode = bool(data.get("mat_use_advanced_mode", False))
+        mat.ambient_strength = float(data.get("mat_ambient_strength", DEFAULT_MAT_AMB_STRENGTH))
+        mat.diffuse_strength = float(data.get("mat_diffuse_strength", DEFAULT_MAT_DIFF_STRENGTH))
+        mat.specular_strength = float(data.get("mat_specular_strength", DEFAULT_MAT_SPEC_STRENGTH))
+        mat.shininess = float(data.get("mat_shininess", DEFAULT_MAT_SHININESS))
+        mat.opacity = float(data.get("mat_opacity", DEFAULT_MAT_OPACITY))
         
-        mat.base_color = glm.vec3(*data.get("base_c", list(DEFAULT_MAT_BASE_COLOR)))
-        mat._ambient = glm.vec3(*data.get("amb_c", list(DEFAULT_MAT_AMBIENT)))
-        mat._diffuse = glm.vec3(*data.get("diff_c", list(DEFAULT_MAT_DIFFUSE)))
-        mat._specular = glm.vec3(*data.get("spec_c", list(DEFAULT_MAT_SPECULAR)))
-        mat.emission = glm.vec3(*data.get("emis_c", list(DEFAULT_MAT_EMISSION)))
+        mat.base_color = glm.vec3(*data.get("mat_base_color", list(DEFAULT_MAT_BASE_COLOR)))
+        mat._ambient = glm.vec3(*data.get("mat__ambient", list(DEFAULT_MAT_AMBIENT)))
+        mat._diffuse = glm.vec3(*data.get("mat__diffuse", list(DEFAULT_MAT_DIFFUSE)))
+        mat._specular = glm.vec3(*data.get("mat__specular", list(DEFAULT_MAT_SPECULAR)))
+        mat.emission = glm.vec3(*data.get("mat_emission", list(DEFAULT_MAT_EMISSION)))
         
-        # Strictly load modern dictionary structure, explicitly rejecting backward compatibility
-        mat.tex_paths = data.get("tex_paths", {})
-        
-        for attr_name, path in mat.tex_paths.items():
-            if path and os.path.exists(path):
-                tid = ResourceManager.load_texture(path)
-                if tid != 0:
-                    setattr(mat, attr_name, tid)
+        mat.apply_texture_paths(data.get("mat_tex_paths", {}))

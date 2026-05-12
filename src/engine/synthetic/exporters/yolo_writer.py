@@ -1,35 +1,98 @@
-import os
-from typing import List, Tuple
+"""
+YOLO Format Exporter.
+
+Serializes object data into standard YOLO dataset formats.
+Dynamically supports both Object Detection (Center Bounding Box) 
+and Instance Segmentation (Polygon Contours).
+Enforces strict domain normalization [0.0, 1.0] and spatial validation.
+"""
+
+from typing import List, Dict, Any
+
 
 class YOLOWriter:
-    """
-    Serializes 2D Bounding Box data into the standard YOLO format:
-    <class_id> <x_center> <y_center> <width> <height> (All values normalized 0.0 to 1.0)
-    """
+    """Handles writing bounding box and segmentation data to YOLO .txt format."""
 
     @staticmethod
-    def export(filepath: str, bboxes: List[Tuple[int, float, float, float, float]], img_w: int, img_h: int) -> None:
+    def export(filepath: str, objects: List[Dict[str, Any]], img_w: int, img_h: int, is_segmentation: bool = False) -> None:
         """
-        :param bboxes: List of tuples (class_id, x_min, y_min, x_max, y_max)
+        Exports a YOLO annotation file.
+        
+        Args:
+            filepath: Destination file path (.txt).
+            objects: List of detected objects containing 'class_id', 'bbox_xyxy', and optionally 'segmentation'.
+            img_w: Source image width for normalization.
+            img_h: Source image height for normalization.
+            is_segmentation: Toggles export mode between Segmentation (Polygons) and Detection (BBoxes).
         """
-        with open(filepath, 'w', encoding='utf-8') as f:
-            for cls_id, xmin, ymin, xmax, ymax in bboxes:
-                # Calculate absolute center and dimensions
-                abs_w = xmax - xmin
-                abs_h = ymax - ymin
+        lines = []
+        
+        for obj in objects:
+            class_id = int(obj.get("class_id", 0))
+            
+            if is_segmentation:
+                # ---------------------------------------------------------
+                # MODE: YOLO INSTANCE SEGMENTATION (Polygons)
+                # Format: <class_id> <x1> <y1> <x2> <y2> ... <xn> <yn>
+                # ---------------------------------------------------------
+                polygons = obj.get("segmentation", [])
+                
+                if polygons and len(polygons[0]) >= 6:
+                    poly = polygons[0]
+                    normalized_poly = []
+                    for i in range(0, len(poly), 2):
+                        nx = max(0.0, min(1.0, poly[i] / img_w))
+                        ny = max(0.0, min(1.0, poly[i+1] / img_h))
+                        normalized_poly.extend([nx, ny])
+                    
+                    poly_str = " ".join([f"{v:.6f}" for v in normalized_poly])
+                    lines.append(f"{class_id} {poly_str}")
+                    
+                else:
+                    # Fallback: Extrapolate a 4-point polygon from the bounding box
+                    bbox = obj.get("bbox_xyxy")
+                    if bbox and len(bbox) == 4:
+                        x1, y1, x2, y2 = bbox
+                        nx1 = max(0.0, min(1.0, x1 / img_w))
+                        ny1 = max(0.0, min(1.0, y1 / img_h))
+                        nx2 = max(0.0, min(1.0, x2 / img_w))
+                        ny2 = max(0.0, min(1.0, y2 / img_h))
+                        
+                        if abs(nx2 - nx1) > 1e-4 and abs(ny2 - ny1) > 1e-4:
+                            rect = [nx1, ny1, nx2, ny1, nx2, ny2, nx1, ny2]
+                            poly_str = " ".join([f"{v:.6f}" for v in rect])
+                            lines.append(f"{class_id} {poly_str}")
+            else:
+                # ---------------------------------------------------------
+                # MODE: YOLO OBJECT DETECTION (Bounding Boxes)
+                # Format: <class_id> <x_center> <y_center> <width> <height>
+                # ---------------------------------------------------------
+                bbox = obj.get("bbox_xyxy")
+                if not bbox or len(bbox) != 4:
+                    continue
+                    
+                xmin, ymin, xmax, ymax = bbox
+                
+                abs_w = max(0.0, xmax - xmin)
+                abs_h = max(0.0, ymax - ymin)
                 abs_cx = xmin + (abs_w / 2.0)
                 abs_cy = ymin + (abs_h / 2.0)
 
-                # Normalize to [0.0, 1.0] domain
-                norm_cx = abs_cx / img_w
-                norm_cy = abs_cy / img_h
-                norm_w = abs_w / img_w
-                norm_h = abs_h / img_h
+                norm_cx = max(0.0, min(1.0, abs_cx / img_w))
+                norm_cy = max(0.0, min(1.0, abs_cy / img_h))
+                norm_w = max(0.0, min(1.0, abs_w / img_w))
+                norm_h = max(0.0, min(1.0, abs_h / img_h))
 
-                # Ensure values strictly remain within bounds to prevent AI training crashes
-                norm_cx = max(0.0, min(1.0, norm_cx))
-                norm_cy = max(0.0, min(1.0, norm_cy))
-                norm_w = max(0.0, min(1.0, norm_w))
-                norm_h = max(0.0, min(1.0, norm_h))
+                # Discard ghost bounding boxes to prevent division-by-zero crashes during AI training
+                if norm_w <= 0.0001 or norm_h <= 0.0001:
+                    continue
 
-                f.write(f"{cls_id} {norm_cx:.6f} {norm_cy:.6f} {norm_w:.6f} {norm_h:.6f}\n")
+                lines.append(f"{class_id} {norm_cx:.6f} {norm_cy:.6f} {norm_w:.6f} {norm_h:.6f}")
+
+        # Always write the file, even if empty. 
+        # YOLO requires empty annotation files for background/negative sample training.
+        with open(filepath, 'w', encoding='utf-8') as f:
+            if lines:
+                f.write("\n".join(lines) + "\n")
+            else:
+                f.write("")

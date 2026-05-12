@@ -1,49 +1,82 @@
-from PySide6.QtWidgets import QVBoxLayout, QTreeWidgetItem, QTreeWidgetItemIterator, QStyle
-from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QKeyEvent
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Set
 
-# Inherit from standard MVC BasePanel
+from PySide6.QtWidgets import QVBoxLayout, QTreeWidgetItem, QStyle, QApplication
+from PySide6.QtCore import Qt, QPoint, QEvent
+from PySide6.QtGui import QKeyEvent, QWheelEvent, QCursor
+
 from src.ui.views.panels.base_panel import BasePanel
-
-# Import the tree widget with Drag & Drop support from the widgets directory
 from src.ui.widgets.custom_lists import EntityTreeWidget
-
-# Import SSOT configuration
 from src.app.config import PANEL_TITLE_HIERARCHY
 
 class HierarchyPanelView(BasePanel):
     """
     Dumb View for the Scene Graph Hierarchy tree.
-    Exclusively handles UI rendering and reports user actions (Clicks, Hotkeys, Drag & Drop) 
-    to the HierarchyController.
+    Exclusively handles UI rendering, state preservation, and reports user actions.
+    Utilizes a global event filter to bypass Qt's QDrag loop, ensuring smooth
+    mouse-wheel scrolling and edge auto-scrolling during drag-and-drop operations.
     """
-    # --- Metadata for MainController to automatically create Docks ---
     PANEL_TITLE = PANEL_TITLE_HIERARCHY
     PANEL_DOCK_AREA = Qt.LeftDockWidgetArea
 
     def setup_ui(self) -> None:
+        """Initializes the layout and custom Tree Widget."""
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
-        # Pass the controller directly to the TreeWidget to enable Drag & Drop reporting
         self.tree_widget = EntityTreeWidget(self._controller)
+        
+        # Enable smooth automatic scrolling when dragging near the top/bottom edges
+        self.tree_widget.setAutoScroll(True)
+        self.tree_widget.setAutoScrollMargin(32)
+        
+        # Install an Application-level event filter to intercept wheel events 
+        # before the QDrag modal loop consumes them.
+        QApplication.instance().installEventFilter(self)
+        
         self.layout.addWidget(self.tree_widget)
+        
+        self._is_internal_selection: bool = False
+        self._is_updating_externally: bool = False
 
     def bind_events(self) -> None:
-        # Report when the user clicks to select a different item
-        self.tree_widget.currentItemChanged.connect(self._on_item_changed)
-        
-        # Set up the right-click Context Menu
+        """Wires up local UI signals to event handlers."""
+        self.tree_widget.itemSelectionChanged.connect(self._on_selection_changed)
+        self.tree_widget.itemChanged.connect(self._on_item_changed)
         self.tree_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self._on_context_menu)
 
     # =========================================================================
-    # EVENT CAPTURE & DELEGATION (View -> Controller)
+    # EVENT CAPTURE & DELEGATION
     # =========================================================================
 
+    def eventFilter(self, obj: Any, event: QEvent) -> bool:
+        """
+        Global Event Interceptor.
+        Forces the Hierarchy tree to scroll if the mouse wheel is used while hovering 
+        over it, even if a Drag-and-Drop operation is currently locking the event queue.
+        """
+        if event.type() == QEvent.Type.Wheel:
+            # Map global cursor position to local tree widget coordinates
+            local_pos = self.tree_widget.mapFromGlobal(QCursor.pos())
+            
+            # Verify if the mouse is currently hovering over the tree widget
+            if self.tree_widget.rect().contains(local_pos):
+                try:
+                    delta = event.angleDelta().y()
+                    if delta != 0:
+                        scroll_bar = self.tree_widget.verticalScrollBar()
+                        # Use a smooth scrolling step (e.g., 3 steps per notch)
+                        step = scroll_bar.singleStep() * 3
+                        direction = -1 if delta > 0 else 1
+                        scroll_bar.setValue(scroll_bar.value() + direction * step)
+                    return True  # Consume the event to prevent double-scrolling
+                except AttributeError:
+                    pass
+                    
+        return super().eventFilter(obj, event)
+
     def keyPressEvent(self, e: QKeyEvent) -> None:
-        """Catches keyboard shortcuts and translates them into corresponding Controller actions."""
+        """Binds standard keyboard shortcuts (Copy, Cut, Paste, Delete)."""
         if not self._controller:
             super().keyPressEvent(e)
             return
@@ -61,42 +94,88 @@ class HierarchyPanelView(BasePanel):
         else: 
             super().keyPressEvent(e)
 
-    def _on_item_changed(self, current: Optional[QTreeWidgetItem], previous: Optional[QTreeWidgetItem]) -> None:
-        """Extracts the ID of the selected Entity and reports it to the Controller."""
+    def _on_selection_changed(self) -> None:
+        """Notifies the Controller when the user clicks an entity node."""
         if not self._controller: 
             return
+        if self._is_updating_externally:
+            return
+            
+        items = self.tree_widget.selectedItems()
+        self._is_internal_selection = True
         
-        if current:
-            idx = current.data(0, Qt.UserRole)
-            if idx is not None:
-                self._controller.handle_item_selected(idx)
-        else:
+        if not items:
             self._controller.handle_item_selected(-1)
+            if hasattr(self._controller, 'handle_multi_selection'):
+                self._controller.handle_multi_selection([])
+        else:
+            primary_item = self.tree_widget.currentItem()
+            if primary_item and primary_item.isSelected():
+                primary_idx = primary_item.data(0, Qt.UserRole)
+            else:
+                primary_idx = items[0].data(0, Qt.UserRole)
+                
+            self._controller.handle_item_selected(primary_idx)
+            
+            if hasattr(self._controller, 'handle_multi_selection'):
+                all_ids = [i.data(0, Qt.UserRole) for i in items]
+                self._controller.handle_multi_selection(all_ids)
+                
+        self._is_internal_selection = False
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        """Fires when the user completes inline editing of a tree item."""
+        if self._is_updating_externally or not self._controller:
+            return
+            
+        ent_id = item.data(0, Qt.UserRole)
+        new_name = item.text(0).strip()
+        
+        if new_name and ent_id is not None:
+            self._controller.handle_rename(ent_id, new_name)
 
     def _on_context_menu(self, pos: QPoint) -> None:
-        """Converts relative coordinates to global coordinates for the Controller to draw the Popup Menu."""
-        if self._controller:
+        """Spawns the right-click contextual menu via the Controller."""
+        if self._controller and hasattr(self._controller, 'show_context_menu'):
             global_pos = self.tree_widget.mapToGlobal(pos)
             self._controller.show_context_menu(global_pos)
 
     # =========================================================================
-    # PUBLIC API FOR DATA INJECTION (Controller -> View)
+    # PUBLIC API FOR DATA INJECTION
     # =========================================================================
 
     def build_tree(self, entities_data: List[Dict[str, Any]], selected_idx: int) -> None:
         """
-        Reconstructs the entire visual hierarchy tree based on the provided data list.
-        Blocks signals to prevent infinite loops during UI updates.
+        Reconstructs the hierarchical tree representation based on backend state.
+        Maintains expanded states and selection dynamically.
         """
+        self._is_updating_externally = True
         self.tree_widget.blockSignals(True)
-        self.tree_widget.clear()
         
+        self.tree_widget.clearSelection()
+        self.tree_widget.setCurrentItem(None)
+        
+        expanded_ids: Set[int] = set()
+        is_first_load = self.tree_widget.topLevelItemCount() == 0
+        
+        def cache_expanded(item: QTreeWidgetItem) -> None:
+            if item.isExpanded():
+                ent_id = item.data(0, Qt.UserRole)
+                if ent_id is not None:
+                    expanded_ids.add(ent_id)
+            for i in range(item.childCount()):
+                cache_expanded(item.child(i))
+
+        for i in range(self.tree_widget.topLevelItemCount()):
+            cache_expanded(self.tree_widget.topLevelItem(i))
+
+        self.tree_widget.clear()
         items_map: Dict[int, QTreeWidgetItem] = {}
         
         dir_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         file_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
         
-        # Phase 1: Instantiate all QTreeWidgetItems
+        # First pass: Create all items
         for data in entities_data:
             item = QTreeWidgetItem([data["name"]])
             item.setData(0, Qt.UserRole, data["id"])
@@ -109,10 +188,9 @@ class HierarchyPanelView(BasePanel):
                 item.setFlags(item.flags() & ~Qt.ItemIsDropEnabled)
                 item.setIcon(0, file_icon)
                 
-                
             items_map[data["id"]] = item
             
-        # Phase 2: Establish Parent-Child relationships based on the 'parent' attribute
+        # Second pass: Parent-Child relationships
         for data in entities_data:
             item = items_map[data["id"]]
             parent_id = data["parent"]
@@ -122,9 +200,15 @@ class HierarchyPanelView(BasePanel):
             else:
                 self.tree_widget.addTopLevelItem(item)
                 
-        self.tree_widget.expandAll()
+        # Restore expansion state
+        if is_first_load:
+            self.tree_widget.expandAll()
+        else:
+            for data in entities_data:
+                if data["id"] in expanded_ids:
+                    items_map[data["id"]].setExpanded(True)
         
-        # Phase 3: Restore previous selection highlight state
+        # Restore selection state
         if selected_idx >= 0 and selected_idx in items_map:
             self.tree_widget.setCurrentItem(items_map[selected_idx])
             items_map[selected_idx].setSelected(True)
@@ -132,27 +216,33 @@ class HierarchyPanelView(BasePanel):
             self.tree_widget.setCurrentItem(None)
             
         self.tree_widget.blockSignals(False)
+        self._is_updating_externally = False
 
     def update_selection(self, idx: int) -> None:
-        """
-        Updates the UI highlight when an item is selected from an external source 
-        (e.g., the user clicks directly on a model in the 3D Viewport).
-        """
+        """Silently synchronizes the UI selection without triggering events."""
+        if self._is_internal_selection:
+            return
+            
+        self._is_updating_externally = True
         self.tree_widget.blockSignals(True)
         
-        # Clear current selection to prevent UI ghosting artifacts
         self.tree_widget.clearSelection()
         self.tree_widget.setCurrentItem(None)
         
-        # Traverse the tree to locate and highlight the matching ID
         if idx >= 0:
-            iterator = QTreeWidgetItemIterator(self.tree_widget)
-            while iterator.value():
-                item = iterator.value()
+            def find_and_select(item: QTreeWidgetItem) -> bool:
                 if item.data(0, Qt.UserRole) == idx:
                     self.tree_widget.setCurrentItem(item)
                     item.setSelected(True)
+                    return True
+                for i in range(item.childCount()):
+                    if find_and_select(item.child(i)):
+                        return True
+                return False
+
+            for i in range(self.tree_widget.topLevelItemCount()):
+                if find_and_select(self.tree_widget.topLevelItem(i)):
                     break
-                iterator += 1
                 
         self.tree_widget.blockSignals(False)
+        self._is_updating_externally = False

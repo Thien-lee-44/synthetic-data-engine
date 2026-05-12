@@ -1,7 +1,16 @@
+"""
+Inspector View.
+
+Provides the Properties Panel UI.
+Dynamically displays widgets corresponding to the components attached to the selected entity.
+"""
+
+import glm
 from PySide6.QtWidgets import QVBoxLayout, QScrollArea, QWidget
 from PySide6.QtCore import Qt
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
+from src.app import ctx
 from src.ui.views.panels.base_panel import BasePanel
 from src.ui.widgets.inspector.header_widget import HeaderWidget
 from src.ui.widgets.inspector.transform_widget import TransformWidget
@@ -18,31 +27,29 @@ from src.app.config import (
     DEFAULT_UI_MARGIN
 )
 
+
 class InspectorPanelView(BasePanel):
-    """
-    Dynamic View that aggregates specific component property widgets based on the selected entity.
-    Acts as the primary interface for modifying ECS component data.
-    """
+    """Orchestrates data routing between Live World State and the Dynamic Keyframe Bag."""
+    
     PANEL_TITLE = PANEL_TITLE_INSPECTOR
     PANEL_DOCK_AREA = Qt.RightDockWidgetArea
     PANEL_MIN_WIDTH = PANEL_MIN_WIDTH_INSPECTOR
 
     def setup_ui(self) -> None:
+        """Initializes the vertical layout and scroll area for the inspector properties."""
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff) 
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QScrollArea.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff) 
         
         self.content = QWidget()
         self.content.setMinimumWidth(PANEL_CONTENT_MIN_WIDTH)
-        content_layout = QVBoxLayout(self.content)
-        
-        m = DEFAULT_UI_MARGIN
-        content_layout.setContentsMargins(m, m, m, m)
-        content_layout.setAlignment(Qt.AlignTop)
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(DEFAULT_UI_MARGIN, DEFAULT_UI_MARGIN, DEFAULT_UI_MARGIN, DEFAULT_UI_MARGIN)
+        self.content_layout.setAlignment(Qt.AlignTop)
 
         self.header_widget = HeaderWidget(self._controller)
         self.semantic_widget = SemanticWidget(self._controller)
@@ -52,67 +59,126 @@ class InspectorPanelView(BasePanel):
         self.light_widget = LightWidget(self._controller)
         self.camera_widget = CameraWidget(self._controller)
 
-        content_layout.addWidget(self.header_widget)
-        content_layout.addWidget(self.semantic_widget)
-        content_layout.addWidget(self.animation_widget)
-        content_layout.addWidget(self.transform_widget)
-        content_layout.addWidget(self.mesh_widget)
-        content_layout.addWidget(self.light_widget)
-        content_layout.addWidget(self.camera_widget)
-        content_layout.addStretch(1)
+        self.content_layout.addWidget(self.header_widget)
+        self.content_layout.addWidget(self.semantic_widget)
+        self.content_layout.addWidget(self.animation_widget)
+        self.content_layout.addWidget(self.transform_widget)
+        self.content_layout.addWidget(self.mesh_widget)
+        self.content_layout.addWidget(self.light_widget)
+        self.content_layout.addWidget(self.camera_widget)
+        self.content_layout.addStretch(1)
         
-        scroll.setWidget(self.content)
-        self.layout.addWidget(scroll)
-        
+        self.scroll.setWidget(self.content)
+        self.layout.addWidget(self.scroll)
         self.hide_all_components()
 
     def hide_all_components(self) -> None:
-        widgets = [
-            self.header_widget, 
-            self.semantic_widget,
-            self.animation_widget,
-            self.transform_widget, 
-            self.mesh_widget, 
-            self.light_widget, 
-            self.camera_widget
-        ]
-        for widget in widgets: 
-            widget.setVisible(False)
+        """Hides all component widgets when no entity is selected."""
+        self.content.setStyleSheet("")
+        self.header_widget.setVisible(False)
+        self.semantic_widget.setVisible(False)
+        self.animation_widget.setVisible(False)
+        self.transform_widget.setVisible(False)
+        self.mesh_widget.setVisible(False)
+        self.light_widget.setVisible(False)
+        self.camera_widget.setVisible(False)
 
     def update_inspector_data(self, data: Dict[str, Any]) -> None:
+        """Populates the individual widgets with data from the Engine context."""
+        kf_idx = data.get("active_keyframe_index", -1)
+        anim_data = data.get("anim", {})
+        keyframes = anim_data.get("keyframes", [])
+        
         has_tf = bool(data.get("tf"))
         has_light = bool(data.get("light"))
         has_cam = bool(data.get("cam"))
         has_semantic = bool(data.get("semantic"))
         has_anim = bool(data.get("anim"))
-        has_mesh = bool(data.get("mesh") and not has_light and not has_cam)
-        mesh_visible = data["mesh"]["visible"] if data.get("mesh") else True
-
-        self.header_widget.update_data(data["name"])
         
-        if has_semantic:
-            self.semantic_widget.update_data(data["semantic"])
-        if has_anim:
-            self.animation_widget.update_data(data["anim"])
-        if has_tf: 
-            self.transform_widget.update_data(data["tf"], has_light, data["light"]["type"] if has_light else "")
-        if has_mesh: 
-            self.mesh_widget.update_data(data["mesh"])
-        if has_light: 
-            self.light_widget.update_data(data["light"], mesh_visible)
-        if has_cam: 
-            self.camera_widget.update_data(data["cam"], mesh_visible)
+        # Hide MeshWidget if entity is Light or Camera
+        has_mesh = bool(data.get("mesh")) and not has_light and not has_cam
+        
+        tf_data = data.get("tf", {})
+        light_data = data.get("light", {})
+        mesh_data = data.get("mesh", {})
+        cam_data = data.get("cam", {})
+        
+        if 0 <= kf_idx < len(keyframes):
+            kf_state = keyframes[kf_idx].get("state", {})
+            
+            if "Transform" in kf_state:
+                snap_tf = kf_state["Transform"]
+                for key in ["position", "scale", "rotation", "quat_rot"]:
+                    if key in snap_tf:
+                        tf_data[key] = snap_tf[key]
+                        
+            if "Light" in kf_state:
+                light_data = dict(data.get("light", {}))
+                light_data.update(kf_state["Light"])
+                        
+            if "Mesh" in kf_state:
+                mesh_data = dict(data.get("mesh", {}))
+                mesh_data.update(kf_state["Mesh"])
 
+            if "Camera" in kf_state:
+                cam_data = dict(data.get("cam", {}))
+                for key, val in kf_state["Camera"].items():
+                    if key == "active":
+                        cam_data["is_active"] = val
+                    elif key == "ortho":
+                        cam_data["ortho_size"] = val
+                    else:
+                        cam_data[key] = val
+
+        self.header_widget.update_data(data.get("name", "Entity"))
         self.header_widget.setVisible(True)
-        self.semantic_widget.setVisible(has_semantic)
-        self.animation_widget.setVisible(has_anim)
-        self.transform_widget.setVisible(has_tf)
-        self.mesh_widget.setVisible(has_mesh)
-        self.light_widget.setVisible(has_light)
-        self.camera_widget.setVisible(has_cam)
+        
+       
+        
+        if has_semantic: 
+            self.semantic_widget.update_data(data.get("semantic"))
+            self.semantic_widget.setVisible(True)
+        else:
+            self.semantic_widget.setVisible(False)
+            
+        if has_anim: 
+            anim_payload = dict(anim_data)
+            anim_payload["active_keyframe_index"] = kf_idx
+            anim_payload["active_keyframe_time"] = data.get("active_keyframe_time", 0.0)
+            self.animation_widget.update_data(anim_payload)
+            self.animation_widget.setVisible(True)
+        else:
+            self.animation_widget.setVisible(False)
 
-    def fast_update_transform(self, transform_tuple: tuple) -> None:
-        if not isinstance(transform_tuple, tuple) or len(transform_tuple) != 2:
+        if has_tf: 
+            self.transform_widget.update_data(tf_data)
+            self.transform_widget.setVisible(True)
+        else:
+            self.transform_widget.setVisible(False)
+            
+        if has_mesh: 
+            self.mesh_widget.update_data(mesh_data)
+            self.mesh_widget.setVisible(True)
+        else:
+            self.mesh_widget.setVisible(False)
+            
+        if has_light: 
+            m_vis = data["mesh"]["visible"] if data.get("mesh") else True
+            self.light_widget.update_data(light_data, m_vis)
+            self.light_widget.setVisible(True)
+        else:
+            self.light_widget.setVisible(False)
+            
+        if has_cam: 
+            m_vis = data["mesh"]["visible"] if data.get("mesh") else True
+            self.camera_widget.update_data(cam_data, m_vis)
+            self.camera_widget.setVisible(True)
+        else:
+            self.camera_widget.setVisible(False)
+
+    def fast_update_transform(self, transform_tuple: Tuple[str, Tuple[float, float, float]]) -> None:
+        """Rapidly pushes dragging changes from the Viewport directly into the SpinBoxes."""
+        if not isinstance(transform_tuple, tuple) or len(transform_tuple) != 2: 
             return
             
         mode, values = transform_tuple
@@ -120,4 +186,8 @@ class InspectorPanelView(BasePanel):
         
         if mode == "ROTATE" and self.light_widget.isVisible():
             if hasattr(self.light_widget, 'fast_update_rotation'):
-                self.light_widget.fast_update_rotation(values)
+                data = ctx.engine.get_selected_entity_data()
+                if data and data.get("light"):
+                    pitch = data["light"].get("pitch", 0.0)
+                    yaw = data["light"].get("yaw", 0.0)
+                    self.light_widget.fast_update_rotation((pitch, yaw))

@@ -1,48 +1,85 @@
 from typing import Any, Dict
-from PySide6.QtWidgets import QFormLayout, QLabel, QComboBox, QPushButton, QHBoxLayout, QInputDialog, QColorDialog
+from PySide6.QtWidgets import (QFormLayout, QLabel, QComboBox, QPushButton, 
+                               QHBoxLayout, QInputDialog, QColorDialog, QCheckBox, QWidget)
 from PySide6.QtGui import QColor
 from src.ui.widgets.inspector.base_widget import BaseComponentWidget
 
 class SemanticWidget(BaseComponentWidget):
-    """
-    Inspector UI component dedicated to AI data labeling (Class ID) and Tracking ID.
-    Now supports custom colors for each semantic class.
-    """
     def __init__(self, controller: Any) -> None:
         super().__init__("Semantic Labeling", controller)
         
-        form = QFormLayout()
+        self.chk_is_object = QCheckBox("Unified Object")
+        self.chk_is_object.setToolTip("Uncheck to use this entity as a folder. Unified Objects forcefully sync semantics to children.")
+        self.chk_is_object.toggled.connect(self.toggle_is_object)
+        self.layout.addWidget(self.chk_is_object)
+
+        self.chk_propagate = QCheckBox("Apply to Children")
+        self.chk_propagate.setToolTip("Bulk-assign this Class ID to all nested entities.")
+        self.chk_propagate.toggled.connect(self.toggle_propagation)
+        self.layout.addWidget(self.chk_propagate)
+
+        self.data_container = QWidget()
+        form = QFormLayout(self.data_container)
         form.setContentsMargins(0, 5, 0, 5)
 
-        self.lbl_track_id = QLabel("-1")
-        self.lbl_track_id.setStyleSheet("color: #4CAF50; font-weight: bold;")
-        form.addRow("Track ID (Auto):", self.lbl_track_id)
+        self.lbl_track_title = QLabel("Track ID:")
+        self.lbl_track_id = QLabel("Auto")
+        self.lbl_track_id.setStyleSheet("color: #00BFFF; font-style: italic; font-weight: bold;")
+        form.addRow(self.lbl_track_title, self.lbl_track_id)
 
         self.cmb_class = QComboBox()
-        self.cmb_class.currentIndexChanged.connect(self.apply_changes)
+        self.cmb_class.currentIndexChanged.connect(self.apply_class_change)
         
         self.btn_color = QPushButton()
         self.btn_color.setFixedWidth(28)
-        self.btn_color.setToolTip("Change Class Color")
         self.btn_color.clicked.connect(self.change_class_color)
 
         self.btn_add = QPushButton("+")
         self.btn_add.setFixedWidth(28)
-        self.btn_add.setToolTip("Add new Semantic Class")
         self.btn_add.clicked.connect(self.add_new_class)
+        
+        self.btn_remove = QPushButton("-")
+        self.btn_remove.setFixedWidth(28)
+        self.btn_remove.clicked.connect(self.remove_current_class)
         
         class_layout = QHBoxLayout()
         class_layout.setContentsMargins(0, 0, 0, 0)
         class_layout.addWidget(self.cmb_class)
         class_layout.addWidget(self.btn_color)
         class_layout.addWidget(self.btn_add)
+        class_layout.addWidget(self.btn_remove)
 
-        form.addRow("Class ID:", class_layout)
-        self.layout.addLayout(form)
+        form.addRow("Class:", class_layout)
+        self.layout.addWidget(self.data_container)
 
     def update_data(self, data: Dict[str, Any]) -> None:
-        self.lbl_track_id.setText(str(data.get("track_id", -1)))
-        
+        is_group = data.get("is_group", False)
+        is_obj = data.get("is_merged_instance", True)
+        should_prop = data.get("propagate_to_children", True)
+
+        self.chk_is_object.setVisible(is_group)
+        self.chk_propagate.setVisible(is_group and not is_obj)
+
+        show_track = is_obj if is_group else True
+        self.lbl_track_title.setVisible(show_track)
+        self.lbl_track_id.setVisible(show_track)
+
+        resolved_id = data.get("resolved_track_id", -1)
+        if resolved_id > 0:
+            self.lbl_track_id.setText(str(resolved_id))
+            self.lbl_track_id.setStyleSheet("color: #00FF00; font-weight: bold;")
+        else:
+            self.lbl_track_id.setText("Auto")
+            self.lbl_track_id.setStyleSheet("color: #00BFFF; font-style: italic; font-weight: bold;")
+
+        self.chk_is_object.blockSignals(True)
+        self.chk_is_object.setChecked(is_obj)
+        self.chk_is_object.blockSignals(False)
+
+        self.chk_propagate.blockSignals(True)
+        self.chk_propagate.setChecked(should_prop)
+        self.chk_propagate.blockSignals(False)
+
         self.cmb_class.blockSignals(True)
         self.cmb_class.clear()
         
@@ -56,7 +93,6 @@ class SemanticWidget(BaseComponentWidget):
         idx = self.cmb_class.findData(target_id)
         if idx >= 0:
             self.cmb_class.setCurrentIndex(idx)
-            
             c_info = classes.get(target_id, {}) if self._controller else {}
             color = c_info.get("color", [1.0, 1.0, 1.0]) if isinstance(c_info, dict) else [1.0, 1.0, 1.0]
             r, g, b = int(color[0] * 255), int(color[1] * 255), int(color[2] * 255)
@@ -64,49 +100,52 @@ class SemanticWidget(BaseComponentWidget):
             
         self.cmb_class.blockSignals(False)
 
-    def apply_changes(self) -> None:
+    def toggle_is_object(self, checked: bool) -> None:
+        self.chk_propagate.setVisible(not checked)
+        self.lbl_track_title.setVisible(checked)
+        self.lbl_track_id.setVisible(checked)
+        
+        if self._controller:
+            self.request_undo_snapshot()
+            self._controller.set_properties("Semantic", {"is_merged_instance": checked})
+
+    def toggle_propagation(self, checked: bool) -> None:
+        if self._controller:
+            self.request_undo_snapshot()
+            self._controller.set_properties("Semantic", {"propagate_to_children": checked})
+
+    def apply_class_change(self) -> None:
         if self._controller:
             class_id = self.cmb_class.currentData()
             if class_id is not None:
-                self._controller.request_undo_snapshot()
-                self._controller.set_property("Semantic", "class_id", class_id)
-                
+                self.request_undo_snapshot()
+                self._controller.set_properties("Semantic", {"class_id": class_id})
                 classes = self._controller.get_semantic_classes()
-                c_info = classes.get(class_id, {})
-                color = c_info.get("color", [1.0, 1.0, 1.0]) if isinstance(c_info, dict) else [1.0, 1.0, 1.0]
-                r, g, b = int(color[0] * 255), int(color[1] * 255), int(color[2] * 255)
-                self.btn_color.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #555; border-radius: 3px;")
+                self.update_data({"class_id": class_id})
 
     def add_new_class(self) -> None:
-        if not self._controller: 
-            return
-            
-        name, ok = QInputDialog.getText(self, "New Semantic Class", "Enter class name (e.g. Tree, Road):")
+        if not self._controller: return
+        name, ok = QInputDialog.getText(self, "New Class", "Enter class name:")
         if ok and name.strip():
             new_id = self._controller.add_semantic_class(name.strip())
-            self.cmb_class.blockSignals(True)
-            self.cmb_class.addItem(f"{new_id}: {name.strip()}", new_id)
-            idx = self.cmb_class.findData(new_id)
-            self.cmb_class.setCurrentIndex(idx)
-            self.cmb_class.blockSignals(False)
-            self.apply_changes()
+            self.update_data({"class_id": new_id})
 
     def change_class_color(self) -> None:
-        if not self._controller: 
-            return
-            
+        if not self._controller: return
         class_id = self.cmb_class.currentData()
-        if class_id is None: 
-            return
-        
         classes = self._controller.get_semantic_classes()
         c_info = classes.get(class_id, {})
-        curr_color = c_info.get("color", [1.0, 1.0, 1.0]) if isinstance(c_info, dict) else [1.0, 1.0, 1.0]
-        
+        curr_color = c_info.get("color", [1.0, 1.0, 1.0])
         init_color = QColor(int(curr_color[0] * 255), int(curr_color[1] * 255), int(curr_color[2] * 255))
-        color = QColorDialog.getColor(init_color, self, "Select Class Color")
         
+        color = QColorDialog.getColor(init_color, self, "Select Class Color")
         if color.isValid():
             rgb = [color.red() / 255.0, color.green() / 255.0, color.blue() / 255.0]
             self._controller.update_semantic_class_color(class_id, rgb)
-            self.btn_color.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #555; border-radius: 3px;")
+            self.update_data({"class_id": class_id})
+
+    def remove_current_class(self) -> None:
+        if not self._controller: return
+        class_id = self.cmb_class.currentData()
+        if class_id == 0: return 
+        self._controller.remove_semantic_class(class_id)

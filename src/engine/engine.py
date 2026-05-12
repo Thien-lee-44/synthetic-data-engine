@@ -1,46 +1,58 @@
+"""
+Core Engine Facade.
+
+Acts as the primary unified interface (Facade Pattern) for the entire 3D subsystem.
+Encapsulates the complex interactions between the Scene Graph, Renderers, 
+and Sub-Managers, allowing the UI and App layers to issue high-level commands safely.
+"""
+
 import glm
 import os
 from OpenGL.GL import *
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Union
 
 from src.engine.scene.scene import Scene
-from src.engine.graphics.renderer import Renderer
+from src.engine.graphics.editor_renderer import Renderer, GizmoRenderer, HUDRenderer
+from src.engine.graphics.synthetic_renderer import SyntheticRenderer
 from src.engine.resources.resource_manager import ResourceManager
 from src.engine.geometry.primitives import PrimitivesManager
 from src.engine.scene.entity_factory import EntityFactory
 from src.engine.scene.scene_manager import SceneManager
 from src.engine.core.interaction_manager import InteractionManager
 from src.engine.scene.animator import AnimatorSystem
- 
+
+
 class Engine:
     """
-    The Ultimate Dynamic Facade.
-    Serves as the singular communication boundary between the Qt-based Editor UI 
-    and the underlying Engine ECS/Renderer backend.
+    The central hub orchestrating all 3D operations.
+    Must be instantiated only after the Qt/OpenGL context is fully created.
     """
-    
+
     def __init__(self) -> None:
-        self.scene = None
-        self.renderer = None
-        self.gizmo_renderer = None
-        self.hud_renderer = None
-        self.entity_fac = None
-        self.scene_mgr = None
-        self.interaction_mgr = None
-        self.animator = None
+        self.scene: Optional[Scene] = None
+        self.renderer: Optional[Renderer] = None
+        self.synthetic_renderer: Optional[SyntheticRenderer] = None
+        self.gizmo_renderer: Optional[GizmoRenderer] = None
+        self.hud_renderer: Optional[HUDRenderer] = None
+        self.entity_fac: Optional[EntityFactory] = None
+        self.scene_mgr: Optional[SceneManager] = None
+        self.interaction_mgr: Optional[InteractionManager] = None
+        self.animator: Optional[AnimatorSystem] = None
 
     def init_viewport_gl(self) -> None:
+        """Bootstraps all core OpenGL-dependent systems for the main viewport."""
         self.scene = Scene()
+        
         self.renderer = Renderer()
+        self.synthetic_renderer = SyntheticRenderer()
+        self.gizmo_renderer = GizmoRenderer()
         
         self.entity_fac = EntityFactory(self.scene)
         self.scene_mgr = SceneManager(self.scene)
         self.interaction_mgr = InteractionManager(self.scene)
-        
-        from src.engine.graphics.editor_renderer import GizmoRenderer
-        self.gizmo_renderer = GizmoRenderer()
-        
         self.animator = AnimatorSystem(self.scene)
+        
+        self.entity_fac.setup_default_scene()
         
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_BLEND)
@@ -48,28 +60,32 @@ class Engine:
         glClearColor(0.0, 0.0, 0.0, 1.0)
 
     def init_hud_gl(self) -> None:
-        from src.engine.graphics.editor_renderer import HUDRenderer
+        """Initializes the secondary OpenGL context for Inspector HUDs."""
         glEnable(GL_DEPTH_TEST)
         glClearColor(0.15, 0.15, 0.15, 1.0)
         self.hud_renderer = HUDRenderer()
 
+    def _sync_active_camera_aspect(self, w: int, h: int) -> None:
+        """Synchronizes the active camera's aspect ratio with the viewport dimensions."""
+        if self.interaction_mgr:
+            _, cam = self.interaction_mgr._get_active_camera()
+            if cam:
+                cam.aspect = w / max(h, 1)
+
     def resize_gl(self, w: int, h: int) -> None:
+        """Handles viewport resize events from the UI."""
         if not self.scene: 
             return
             
         glViewport(0, 0, w, h)
-        _, cam = self.interaction_mgr._get_active_camera()
-        
-        if cam: 
-            cam.aspect = w / max(h, 1)
-
-    # =========================================================================
-    # CORE RENDER AND PICKING DELEGATES
-    # =========================================================================
+        self._sync_active_camera_aspect(w, h)
 
     def render_viewport(self, w: int, h: int, bg_color: tuple, active_axis: str, hovered_axis: str, hovered_screen_axis: str) -> None:
+        """Main rendering loop executed by the Qt QOpenGLWidget."""
         if not self.scene or not self.renderer or not self.interaction_mgr: 
             return
+            
+        self._sync_active_camera_aspect(w, h)
             
         glClearColor(*bg_color, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -88,14 +104,26 @@ class Engine:
                 active_axis or hovered_axis
             )
 
+    def capture_fbo_frame(self, width: int, height: int, mode: str = "RGB", return_texture_id: bool = False) -> Union[bytes, int]:
+        """Triggers the synthetic renderer to capture an off-screen frame."""
+        if not self.synthetic_renderer or not self.scene:
+            return 0 if return_texture_id else b""
+        self._sync_active_camera_aspect(width, height)
+        return self.synthetic_renderer.capture_fbo_frame(self.scene, width, height, mode, return_texture_id)
+
     def raycast_select(self, mx: float, my: float, width: int, height: int) -> int:
+        """Translates 2D cursor coordinates to a 3D Entity selection."""
         if not self.renderer or not self.scene:
             return -1
+        self._sync_active_camera_aspect(width, height)
         return self.renderer.raycast_select(self.scene, mx, my, width, height)
 
     def render_sun_hud(self, w: int, h: int, active_axis: str, is_hover: bool) -> None:
+        """Renders the directional light rotation HUD."""
         if not self.scene or self.scene.selected_index < 0 or not self.hud_renderer or not self.interaction_mgr: 
             return
+            
+        self._sync_active_camera_aspect(w, h)
             
         from src.engine.scene.components import TransformComponent
         target_tf = self.scene.entities[self.scene.selected_index].get_component(TransformComponent)
@@ -107,11 +135,10 @@ class Engine:
             self.hud_renderer.render(w, h, active_axis, is_hover, target_tf, view)
 
     # =========================================================================
-    # RESOURCE MANAGEMENT DELEGATES
+    # RESOURCE MANAGEMENT DELEGATION
     # =========================================================================
-    
+
     def preload_model_to_cache(self, path: str) -> None:
-        """Parses the model file and loads its BufferObjects into the GPU cache without spawning it in the scene."""
         ResourceManager.get_model(path)
     
     def get_project_models(self) -> list: 
@@ -145,10 +172,9 @@ class Engine:
             ResourceManager.project_models.remove(path)
 
     # =========================================================================
-    # EXPLICIT MANAGER DELEGATIONS
+    # SCENE & ENTITY MANAGEMENT DELEGATION
     # =========================================================================
-    
-    # ------------------ SceneManager Delegates ------------------
+
     def has_clipboard(self) -> bool:
         return self.scene_mgr.has_clipboard() if self.scene_mgr else False
 
@@ -178,12 +204,22 @@ class Engine:
 
     def clear_scene(self) -> None:
         if self.scene_mgr: self.scene_mgr.clear_scene()
+        if self.entity_fac: self.entity_fac.setup_default_scene()
 
     def get_selected_entity_data(self) -> Optional[Dict[str, Any]]:
         return self.scene_mgr.get_selected_entity_data() if self.scene_mgr else None
 
     def set_component_property(self, comp_name: str, prop: str, value: Any) -> None:
         if self.scene_mgr: self.scene_mgr.set_component_property(comp_name, prop, value)
+        
+    def set_component_properties(self, comp_name: str, payload: Dict[str, Any]) -> None:
+        if self.scene_mgr: self.scene_mgr.set_component_properties(comp_name, payload)
+        
+    def group_selected_entities(self, entity_ids: List[int]) -> None:
+        if self.scene_mgr: self.scene_mgr.group_selected_entities(entity_ids)
+
+    def ungroup_selected_entity(self) -> None:
+        if self.scene_mgr: self.scene_mgr.ungroup_selected_entity()
 
     def copy_selected(self) -> None:
         if self.scene_mgr: self.scene_mgr.copy_selected()
@@ -233,7 +269,6 @@ class Engine:
     def export_scene_obj(self, export_dir: str) -> None:
         if self.scene_mgr: self.scene_mgr.export_scene_obj(export_dir)
 
-    # ------------------ EntityFactory Delegates ------------------
     def add_empty_group(self) -> None:
         if self.entity_fac: self.entity_fac.add_empty_group()
 
@@ -252,7 +287,10 @@ class Engine:
     def spawn_model_from_path(self, path: str) -> None:
         if self.entity_fac: self.entity_fac.spawn_model_from_path(path)
 
-    # ------------------ InteractionManager Delegates ------------------
+    # =========================================================================
+    # INTERACTION & CAMERA DELEGATION
+    # =========================================================================
+
     def check_gizmo_hover(self, mx: float, my: float, width: int, height: int, custom_tf=None, custom_view=None, custom_proj=None, is_hud=False) -> Optional[str]:
         return self.interaction_mgr.check_gizmo_hover(mx, my, width, height, custom_tf, custom_view, custom_proj, is_hud) if self.interaction_mgr else None
 
@@ -286,23 +324,181 @@ class Engine:
     def get_screen_axis_labels_data(self, width: int, height: int) -> List[Dict[str, Any]]:
         return self.interaction_mgr.get_screen_axis_labels_data(width, height) if self.interaction_mgr else []
 
-    # ------------------ Renderer Delegates ------------------
     def toggle_wireframe(self) -> None:
         if self.renderer: self.renderer.toggle_wireframe()
 
     def set_render_settings(self, wireframe: bool, mode: int, output: int, light: bool, tex: bool, vcolor: bool) -> None:
         if self.renderer: self.renderer.set_render_settings(wireframe, mode, output, light, tex, vcolor)
-        
 
     # =========================================================================
-    # SEMANTIC DELEGATION
+    # SEMANTICS & ANIMATION DELEGATION
     # =========================================================================
-    
+
     def get_semantic_classes(self) -> dict:
-        return self.scene_mgr.get_semantic_classes()
+        return self.scene_mgr.get_semantic_classes() if self.scene_mgr else {}
 
     def add_semantic_class(self, name: str) -> int:
-        return self.scene_mgr.add_semantic_class(name)
+        return self.scene_mgr.add_semantic_class(name) if self.scene_mgr else -1
 
     def update_semantic_class_color(self, class_id: int, color: list) -> None:
-        self.scene_mgr.update_semantic_class_color(class_id, color)
+        if self.scene_mgr: self.scene_mgr.update_semantic_class_color(class_id, color)
+
+    def remove_semantic_class(self, class_id: int) -> None:
+        if self.scene_mgr: self.scene_mgr.remove_semantic_class(class_id)
+
+    def get_animation_info(self) -> dict:
+        return self.scene_mgr.get_animation_info() if self.scene_mgr else {}
+
+    def set_active_keyframe(self, index: int) -> float:
+        return self.scene_mgr.set_active_keyframe(index) if self.scene_mgr else 0.0
+
+    def sync_gizmo_to_keyframe(self, current_time: float, is_hud_drag: bool = False) -> Tuple[bool, float]:
+        if self.scene_mgr and hasattr(self.scene_mgr.animation, 'sync_gizmo_to_keyframe'):
+            return self.scene_mgr.animation.sync_gizmo_to_keyframe(current_time, is_hud_drag)
+        return False, current_time
+
+    def update_keyframe_property(self, current_time: float, comp_name: str, prop: str, value: Any) -> tuple:
+        return self.scene_mgr.update_keyframe_property(current_time, comp_name, prop, value) if self.scene_mgr else (False, False, 0.0)
+
+    def update_keyframe_properties(self, current_time: float, comp_name: str, payload: Dict[str, Any]) -> tuple:
+        return self.scene_mgr.update_keyframe_properties(current_time, comp_name, payload) if self.scene_mgr else (False, False, 0.0)
+
+    def add_and_focus_keyframe(self, time: float) -> int:
+        return self.scene_mgr.add_and_focus_keyframe(time) if self.scene_mgr else -1
+
+    def mutate_keyframes(self, payload: dict) -> None:
+        """Delegates bulk timeline keyframe manipulations to the animation manager."""
+        if self.scene_mgr and self.scene and self.scene.selected_index >= 0:
+            ent = self.scene.entities[self.scene.selected_index]
+            from src.engine.scene.components.animation_cmp import AnimationComponent
+            anim = ent.get_component(AnimationComponent)
+            if anim:
+                self.scene_mgr.animation.handle_animation_property(ent, anim, "MUTATE_KEYFRAMES", payload)
+
+    def get_resolved_track_id(self, ent: Any) -> int:
+        """
+        Resolves the consistent Instance Tracking ID for Ground Truth segmentation.
+        Merges hierarchy components safely to produce a unique integer ID.
+        """
+        if not self.scene or ent not in self.scene.entities:
+            return -1
+            
+        from src.engine.scene.components.semantic_cmp import SemanticComponent
+        from src.engine.scene.components import MeshRenderer
+        
+        sem = ent.get_component(SemanticComponent)
+        if sem and getattr(sem, 'track_id', -1) > 0: 
+            return sem.track_id
+            
+        target_map = {}
+        dense_id = 1
+        
+        for e in self.scene.entities:
+            e_sem = e.get_component(SemanticComponent)
+            e_mesh = e.get_component(MeshRenderer)
+            if e_sem and e_mesh and getattr(e_mesh, 'visible', True) and not getattr(e_mesh, 'is_proxy', False):
+                t = e
+                p = e.parent
+                while p:
+                    p_sem = p.get_component(SemanticComponent)
+                    if p_sem and getattr(p_sem, 'is_merged_instance', False):
+                        t = p
+                    p = p.parent
+                
+                if t not in target_map:
+                    target_map[t] = dense_id
+                    dense_id += 1
+                    
+        target = ent
+        p = ent.parent
+        while p:
+            p_sem = p.get_component(SemanticComponent)
+            if p_sem and getattr(p_sem, 'is_merged_instance', False):
+                target = p
+            p = p.parent
+            
+        return target_map.get(target, -1)
+    
+    # =========================================================================
+    # SYNTHETIC DATA & AI FACADE API
+    # =========================================================================
+
+    def run_synthetic_generation(self, settings: Dict[str, Any], progress_cb: Optional[Any] = None) -> str:
+        """Facade method to execute the synthetic data generation batch."""
+        from src.engine.synthetic.generator import SyntheticDataGenerator
+        generator = SyntheticDataGenerator(self)
+        
+        target_dir = settings.get("output_dir") if settings.get("output_dir") else None
+        generator.setup_directories(target_dir)
+        
+        generator.generate_batch(
+            num_frames=settings["num_frames"],
+            dt=settings["dt"],
+            res_w=settings["res_w"],
+            res_h=settings["res_h"],
+            use_rand_light=settings["use_rand_light"],
+            use_rand_cam=settings["use_rand_cam"],
+            progress_cb=progress_cb,
+            preview_stride=max(1, settings["num_frames"] // 120)
+        )
+        return str(generator.output_dir)
+
+    def get_synthetic_preview(self, w: int, h: int, mode: str, is_playing: bool, show_bbox: bool) -> Dict[str, Any]:
+        """Facade method to extract a single preview frame for the UI."""
+        from src.engine.synthetic.generator import SyntheticDataGenerator
+        if not hasattr(self, "_gen_instance") or self._gen_instance is None:
+            self._gen_instance = SyntheticDataGenerator(self)
+            
+        return self._gen_instance.extract_preview_frame(w, h, mode, is_playing, show_bbox)
+
+    def run_cv_benchmark(self, config_dict: Dict[str, Any], dataset_dir: Any, output_dir: Any) -> Dict[str, Any]:
+        """Facade method to trigger Computer Vision benchmarking using raw dictionary config."""
+        from src.engine.synthetic.cv_benchmark import CVBenchmarkRunner, CVBenchmarkConfig
+        
+        config = CVBenchmarkConfig(
+            model_type=config_dict.get("model_type"),
+            task=config_dict.get("task", "auto"),
+            epochs=config_dict.get("epochs", 3),
+            batch_size=config_dict.get("batch_size", 8),
+            imgsz=config_dict.get("imgsz", 640),
+            confidence_threshold=config_dict.get("confidence_threshold", 0.25),
+            run_training=config_dict.get("run_training", True),
+            split_ratios=config_dict.get("split_ratios", (0.7, 0.2, 0.1)) # GẮN VÀO CONFIG
+        )
+        
+        runner = CVBenchmarkRunner(output_dir=output_dir, config=config)
+        dataset_name = dataset_dir.name or "dataset"
+        return runner.run({dataset_name: dataset_dir})
+
+    def get_max_animation_duration(self) -> float:
+        """Facade method to scan the scene and return the longest animation track duration."""
+        from src.engine.scene.components.animation_cmp import AnimationComponent
+        max_dur = 0.0
+        if not self.scene: 
+            return max_dur
+            
+        for ent in self.scene.entities:
+            anim = ent.get_component(AnimationComponent)
+            if anim and anim.duration > max_dur:
+                max_dur = anim.duration
+        return max_dur
+    
+    def run_synthetic_generation(self, settings: Dict[str, Any], progress_cb: Optional[Any] = None) -> str:
+        """Facade method to execute the synthetic data generation batch."""
+        from src.engine.synthetic.generator import SyntheticDataGenerator
+        generator = SyntheticDataGenerator(self)
+        
+        target_dir = settings.get("output_dir") if settings.get("output_dir") else None
+        generator.setup_directories(target_dir)
+        
+        generator.generate_batch(
+            num_frames=settings["num_frames"],
+            dt=settings["dt"],
+            res_w=settings["res_w"],
+            res_h=settings["res_h"],
+            use_rand_light=settings["use_rand_light"],
+            use_rand_cam=settings["use_rand_cam"],
+            progress_cb=progress_cb,
+            preview_stride=max(1, settings["num_frames"] // 120),
+        )
+        return str(generator.output_dir)

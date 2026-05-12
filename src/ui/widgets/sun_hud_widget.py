@@ -1,14 +1,20 @@
+"""
+Sun HUD Widget.
+
+Provides a miniature 3D OpenGL viewport dedicated to controlling the 
+orientation of the Directional Light in the scene.
+"""
+
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QMouseEvent
 from typing import Optional
 
-from src.app import ctx
+from src.app import ctx, AppEvent
 from src.ui.controllers.viewport_ctrl import ViewportController
+from src.app.config import SUN_HUD_MIN_HEIGHT, TARGET_FPS
 
-# Import centralized HUD sizing
-from src.app.config import SUN_HUD_MIN_HEIGHT
 
 class SunHUDWidget(QOpenGLWidget):
     """
@@ -16,33 +22,26 @@ class SunHUDWidget(QOpenGLWidget):
     Operates completely independently of the main viewport, utilizing its own EventBus 
     and a dedicated ViewportController instantiated in 'HUD mode'.
     """
+    
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         
         self.setMouseTracking(True)
         self.setMinimumHeight(SUN_HUD_MIN_HEIGHT) 
         
-        # Instantiate an isolated Controller specifically to capture interactions within this widget
         self._controller = ViewportController(is_hud=True)
         
-        # The HUD requires a constant framerate for continuous arcball redrawing (effectively unlocking the render loop)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
-        self.timer.start(0)
-
-    # =========================================================================
-    # OPENGL LIFECYCLE EVENTS (Communicates with the Engine via global ctx)
-    # =========================================================================
+        hud_interval = max(1, int(1000 / max(TARGET_FPS, 1)))
+        self.timer.start(hud_interval)
 
     def initializeGL(self) -> None:
-        """Initializes the specific hardware state machine needed for the HUD."""
+        """Bootstraps the HUD OpenGL context via the Engine."""
         ctx.engine.init_hud_gl()
 
     def paintGL(self) -> None:
-        """
-        Executes the specialized HUD render pass. 
-        Delegates to the engine to highlight the rotational axis currently being hovered over.
-        """
+        """Renders the interactive compass interface to control the light direction."""
         ctx.engine.render_sun_hud(
             self.width(), 
             self.height(), 
@@ -50,11 +49,8 @@ class SunHUDWidget(QOpenGLWidget):
             self.underMouse()
         )
 
-    # =========================================================================
-    # MOUSE EVENT HANDLING (Delegated to isolated Controller logic)
-    # =========================================================================
-
     def mousePressEvent(self, e: QMouseEvent) -> None: 
+        """Delegates mouse press interactions (axis selection) to the HUD controller."""
         self.makeCurrent()
         self._controller.process_press(
             e.position().x(), 
@@ -66,11 +62,13 @@ class SunHUDWidget(QOpenGLWidget):
         self.doneCurrent()
         
     def mouseReleaseEvent(self, e: QMouseEvent) -> None: 
+        """Releases the dragging state of the selected axis."""
         self.makeCurrent()
         self._controller.process_release(e.button())
         self.doneCurrent()
         
     def mouseMoveEvent(self, e: QMouseEvent) -> None: 
+        """Delegates mouse drag motions and syncs the rotation changes to the timeline."""
         self.makeCurrent()
         self._controller.process_move(
             e.position().x(), 
@@ -79,4 +77,25 @@ class SunHUDWidget(QOpenGLWidget):
             self.width(), 
             self.height()
         )
+        
+        if e.buttons() & Qt.LeftButton:
+            timeline = getattr(ctx.main_window._controller, 'timeline_ctrl', None) if hasattr(ctx, 'main_window') else None
+            curr_time = timeline.current_time if timeline else 0.0
+            
+            is_new_kf, target_time = ctx.engine.sync_gizmo_to_keyframe(curr_time)
+            
+            if timeline:
+                if is_new_kf:
+                    timeline._refresh_dope_sheet()
+                if abs(timeline.current_time - target_time) > 0.001:
+                    timeline.set_time(target_time)
+                elif hasattr(ctx.engine, 'animator'):
+                    ctx.engine.animator.evaluate(target_time, 0.0)
+            elif hasattr(ctx.engine, 'animator'):
+                ctx.engine.animator.evaluate(target_time, 0.0)
+                
+            ctx.events.emit(AppEvent.SCENE_CHANGED)
+            
+            ctx.events.emit(AppEvent.COMPONENT_PROPERTY_CHANGED)
+            
         self.doneCurrent()

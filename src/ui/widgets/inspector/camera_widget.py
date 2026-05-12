@@ -1,9 +1,15 @@
+"""
+Camera Widget.
+
+Provides the Inspector UI for configuring Camera components, allowing users 
+to manipulate projection modes, clipping planes, and Field of View.
+"""
+
 from typing import Any, Dict
 from PySide6.QtWidgets import QFormLayout, QPushButton, QCheckBox, QComboBox, QLabel
 from src.ui.widgets.custom_inputs import SliderSpinBox
 from .base_widget import BaseComponentWidget
 
-# Import SSOT configuration
 from src.app.config import (
     DEFAULT_CAMERA_FOV, DEFAULT_CAMERA_NEAR, DEFAULT_CAMERA_FAR,
     CAMERA_FOV_RANGE, CAMERA_FOV_STEP, CAMERA_ORTHO_RANGE, 
@@ -12,7 +18,13 @@ from src.app.config import (
     STYLE_BTN_ACTIVE_CAM, STYLE_BTN_INACTIVE_CAM
 )
 
+
 class CameraWidget(BaseComponentWidget):
+    """
+    Inspector widget handling Camera properties.
+    Manages state toggling between active scene cameras and visual proxy meshes.
+    """
+    
     def __init__(self, controller: Any) -> None:
         super().__init__("Camera", controller)
         f_cam = QFormLayout()
@@ -49,7 +61,9 @@ class CameraWidget(BaseComponentWidget):
         self.layout.addLayout(f_cam)
 
     def update_data(self, cd: Dict[str, Any], mesh_visible: bool) -> None:
-        if cd["active"]:
+        """Populates the widget fields based on the current camera component state."""
+        is_active = bool(cd.get("is_active", cd.get("active", False)))
+        if is_active:
             self.btn_set_cam_active.setText("Active Camera")
             self.btn_set_cam_active.setStyleSheet(STYLE_BTN_ACTIVE_CAM)
             self.btn_set_cam_active.setEnabled(False) 
@@ -85,7 +99,7 @@ class CameraWidget(BaseComponentWidget):
         self.sp_cam_ortho.setVisible(not is_persp)
 
         self.sp_cam_fov.setValue(cd.get("fov", DEFAULT_CAMERA_FOV))
-        self.sp_cam_ortho.setValue(cd.get("ortho", 5.0))
+        self.sp_cam_ortho.setValue(cd.get("ortho_size", cd.get("ortho", 5.0)))
         self.sp_cam_near.setValue(cd.get("near", DEFAULT_CAMERA_NEAR))
         self.sp_cam_far.setValue(cd.get("far", DEFAULT_CAMERA_FAR))
 
@@ -96,16 +110,19 @@ class CameraWidget(BaseComponentWidget):
         self.sp_cam_far.blockSignals(False)
 
     def set_active_camera(self) -> None:
-        if not self._controller: return
+        """Sets the selected camera as the primary viewpoint for the scene."""
+        if not self._controller: 
+            return
         self.request_undo_snapshot()
-        # This function calls ctx directly because the operation is closely related to the Engine
         from src.app import ctx, AppEvent
         ctx.engine.set_active_camera_selected()
         ctx.events.emit(AppEvent.ENTITY_SELECTED, ctx.engine.get_selected_entity_id())
         ctx.events.emit(AppEvent.SCENE_CHANGED)
 
     def apply_camera(self) -> None:
-        if not self._controller: return
+        """Commits local property modifications to the backend Camera Component."""
+        if not self._controller: 
+            return
             
         mode = ["Perspective", "Orthographic"][self.cmb_cam_mode.currentIndex()]
         is_persp = (mode == "Perspective")
@@ -115,11 +132,14 @@ class CameraWidget(BaseComponentWidget):
         self.lbl_cam_ortho.setVisible(not is_persp)
         self.sp_cam_ortho.setVisible(not is_persp)
 
-        self._controller.set_property("Camera", "mode", mode)
-        self._controller.set_property("Camera", "fov", self.sp_cam_fov.value())
-        self._controller.set_property("Camera", "ortho_size", self.sp_cam_ortho.value())
-        self._controller.set_property("Camera", "near", self.sp_cam_near.value())
-        self._controller.set_property("Camera", "far", self.sp_cam_far.value())
+        payload = {
+            "mode": mode,
+            "fov": self.sp_cam_fov.value(),
+            "ortho_size": self.sp_cam_ortho.value(),
+            "near": self.sp_cam_near.value(),
+            "far": self.sp_cam_far.value()
+        }
+        self._controller.set_properties("Camera", payload)
 
         if self.chk_cam_proxy.isEnabled(): 
-            self._controller.set_property("Mesh", "visible", self.chk_cam_proxy.isChecked())
+            self._controller.set_properties("Mesh", {"visible": self.chk_cam_proxy.isChecked()})
